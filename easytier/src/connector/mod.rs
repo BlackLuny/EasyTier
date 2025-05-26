@@ -12,8 +12,8 @@ use crate::tunnel::wireguard::{WgConfig, WgTunnelConnector};
 use crate::{
     common::{error::Error, global_ctx::ArcGlobalCtx, network::IPCollector},
     tunnel::{
-        check_scheme_and_get_socket_addr, ring::RingTunnelConnector, tcp::TcpTunnelConnector,
-        udp::UdpTunnelConnector, IpVersion, TunnelConnector,
+        check_scheme_and_get_socket_addr, hammer::HammerTunnelConnector, ring::RingTunnelConnector,
+        tcp::TcpTunnelConnector, udp::UdpTunnelConnector, IpVersion, TunnelConnector,
     },
 };
 
@@ -148,6 +148,22 @@ pub async fn create_connector_by_url(
         }
         "txt" | "srv" => {
             let connector = dns_connector::DNSTunnelConnector::new(url, global_ctx.clone());
+            Box::new(connector)
+        }
+        "hammer" => {
+            let dst_addr =
+                check_scheme_and_get_socket_addr::<SocketAddr>(&url, "hammer", ip_version).await?;
+            let nid = global_ctx.get_network_identity();
+            let mut connector =
+                HammerTunnelConnector::new(url, &nid.network_secret.unwrap_or_default());
+            if global_ctx.config.get_flags().bind_device {
+                set_bind_addr_for_peer_connector(
+                    &mut connector,
+                    dst_addr.is_ipv4(),
+                    &global_ctx.get_ip_collector(),
+                )
+                .await;
+            }
             Box::new(connector)
         }
         _ => {

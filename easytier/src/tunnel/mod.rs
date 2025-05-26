@@ -16,6 +16,7 @@ use self::packet_def::ZCPacket;
 pub mod buf;
 pub mod common;
 pub mod filter;
+pub mod hammer;
 pub mod mpsc;
 pub mod packet_def;
 pub mod ring;
@@ -200,6 +201,7 @@ fn default_port(scheme: &str) -> Option<u16> {
         "wss" => Some(11012),
         "quic" => Some(11012),
         "wg" => Some(11011),
+        "hammer" => Some(11930),
         _ => None,
     }
 }

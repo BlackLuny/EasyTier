@@ -16,8 +16,8 @@ use crate::{
     },
     peers::peer_manager::PeerManager,
     tunnel::{
-        ring::RingTunnelListener, tcp::TcpTunnelListener, udp::UdpTunnelListener, Tunnel,
-        TunnelListener,
+        hammer::HammerTunnelListener, ring::RingTunnelListener, tcp::TcpTunnelListener,
+        udp::UdpTunnelListener, Tunnel, TunnelListener,
     },
 };
 
@@ -43,6 +43,13 @@ pub fn get_listener_by_url(
         "ws" | "wss" => {
             use crate::tunnel::websocket::WSTunnelListener;
             Box::new(WSTunnelListener::new(l.clone()))
+        }
+        "hammer" => {
+            let nid = _ctx.get_network_identity();
+            Box::new(HammerTunnelListener::new(
+                l.clone(),
+                &nid.network_secret.unwrap_or_default(),
+            ))
         }
         _ => {
             return Err(Error::InvalidUrl(l.to_string()));
