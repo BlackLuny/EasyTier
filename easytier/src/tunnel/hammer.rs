@@ -334,15 +334,20 @@ mod tests {
         let listener =
             HammerTunnelListener::new("hammer://[::1]:31015".parse().unwrap(), "1234567890123456");
         let mut connector = HammerTunnelConnector::new(
-            "hammer://test.easytier.top:31015".parse().unwrap(),
+            "hammer://[::1]:31015".parse().unwrap(),
             "1234567890123456",
         );
         connector.set_ip_version(IpVersion::V6);
         _tunnel_pingpong(listener, connector).await;
 
-        let listener = HammerTunnelListener::new("tcp://127.0.0.1:31015".parse().unwrap());
-        let mut connector =
-            HammerTunnelConnector::new("tcp://test.easytier.top:31015".parse().unwrap());
+        let listener = HammerTunnelListener::new(
+            "hammer://0.0.0.0:31015".parse().unwrap(),
+            "1234567890123456",
+        );
+        let mut connector = HammerTunnelConnector::new(
+            "hammer://0.0.0.0:31015".parse().unwrap(),
+            "1234567890123456",
+        );
         connector.set_ip_version(IpVersion::V4);
         _tunnel_pingpong(listener, connector).await;
     }
