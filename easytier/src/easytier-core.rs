@@ -17,7 +17,7 @@ use easytier::{
     common::{
         config::{
             ConfigLoader, ConsoleLoggerConfig, FileLoggerConfig, NetworkIdentity, PeerConfig,
-            PortForwardConfig, TomlConfigLoader, VpnPortalConfig,
+            TomlConfigLoader, VpnPortalConfig,
         },
         constants::EASYTIER_VERSION,
         global_ctx::{EventBusSubscriber, GlobalCtx, GlobalCtxEvent},
@@ -712,7 +712,7 @@ impl TryFrom<&Cli> for TomlConfigLoader {
             .parse()
             .expect(format!("failed to parse remote destination addr {}", example_str).as_str());
 
-            let port_forward_item = PortForwardConfig {
+            let port_forward_item = easytier::common::config::PortForwardConfig {
                 bind_addr,
                 dst_addr,
                 proto: port_forward.scheme().to_string(),

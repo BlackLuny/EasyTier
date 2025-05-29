@@ -10,13 +10,12 @@ use pnet::packet::MutablePacket;
 use pnet::packet::Packet;
 use socket2::{SockRef, TcpKeepalive};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicBool, AtomicU16};
+use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::select;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::Instrument;
@@ -39,6 +38,9 @@ use super::CidrSet;
 
 #[cfg(feature = "smoltcp")]
 use super::tokio_smoltcp::{self, channel_device, Net, NetConfig};
+
+#[cfg(feature = "smoltcp")]
+use tokio::sync::mpsc;
 
 #[async_trait::async_trait]
 pub(crate) trait NatDstConnector: Send + Sync + Clone + 'static {
@@ -232,7 +234,7 @@ impl SmolTcpListener {
             tasks.spawn(async move {
                 let mut not_listening_count = 0;
                 loop {
-                    select! {
+                    tokio::select! {
                         _ = tokio::time::sleep(Duration::from_secs(2)) => {
                             if tcp.is_listening() {
                                 not_listening_count = 0;
@@ -321,7 +323,7 @@ pub struct TcpProxy<C: NatDstConnector> {
     #[cfg(feature = "smoltcp")]
     smoltcp_net: Arc<Mutex<Option<Net>>>,
     #[cfg(feature = "smoltcp")]
-    enable_smoltcp: Arc<AtomicBool>,
+    enable_smoltcp: Arc<std::sync::atomic::AtomicBool>,
 
     connector: C,
 }
@@ -466,7 +468,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
             #[cfg(feature = "smoltcp")]
             smoltcp_net: Arc::new(Mutex::new(None)),
             #[cfg(feature = "smoltcp")]
-            enable_smoltcp: Arc::new(AtomicBool::new(true)),
+            enable_smoltcp: Arc::new(std::sync::atomic::AtomicBool::new(true)),
 
             connector,
         })
@@ -802,7 +804,8 @@ impl<C: NatDstConnector> TcpProxy<C> {
 
     pub fn is_smoltcp_enabled(&self) -> bool {
         #[cfg(feature = "smoltcp")]
-        return self.enable_smoltcp
+        return self
+            .enable_smoltcp
             .load(std::sync::atomic::Ordering::Relaxed);
         #[cfg(not(feature = "smoltcp"))]
         return false;

@@ -29,7 +29,7 @@ use super::{
 pub static RING_TUNNEL_CAP: usize = 128;
 static RING_TUNNEL_RESERVERD_CAP: usize = 4;
 
-type RingLock = parking_lot::Mutex<()>;
+type RingLock = std::sync::Mutex<()>;
 
 type RingItem = SinkItem;
 
