@@ -313,6 +313,7 @@ impl PeerConn {
             async move {
                 tracing::info!("start recving peer conn packet");
                 let mut task_ret = Ok(());
+                // 接收peer的数据包，发送给peer manager或者自行处理
                 while let Some(ret) = stream.next().await {
                     if ret.is_err() {
                         tracing::error!(error = ?ret, "peer conn recv error");
@@ -339,6 +340,7 @@ impl PeerConn {
                             tracing::error!(?e, "peer conn send ctrl resp error");
                         }
                     } else {
+                        // 发送给peer manager
                         if sender.send(zc_packet).await.is_err() {
                             break;
                         }
