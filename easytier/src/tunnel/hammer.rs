@@ -132,7 +132,7 @@ fn get_tunnel_with_tcp_stream(
     let info = TunnelInfo {
         tunnel_type: "hammer".to_owned(),
         local_addr: Some(
-            super::build_url_from_socket_addr(&stream.local_addr()?.to_string(), "tcp").into(),
+            super::build_url_from_socket_addr(&stream.local_addr()?.to_string(), "hammer").into(),
         ),
         remote_addr: Some(remote_url.into()),
     };
