@@ -46,29 +46,24 @@ use crate::gateway::socks5::Socks5Server;
 #[derive(Clone)]
 struct IpProxy {
     tcp_proxy: Arc<TcpProxy<NatDstTcpConnector>>,
-    icmp_proxy: Arc<IcmpProxy>,
-    udp_proxy: Arc<UdpProxy>,
+    icmp_proxy: Option<Arc<IcmpProxy>>,
+    udp_proxy: Option<Arc<UdpProxy>>,
     global_ctx: ArcGlobalCtx,
     started: Arc<AtomicBool>,
 }
 
 impl IpProxy {
     fn new(global_ctx: ArcGlobalCtx, peer_manager: Arc<PeerManager>) -> Result<Self, Error> {
-        let tcp_proxy = TcpProxy::new(peer_manager.clone(), NatDstTcpConnector {});
-        let icmp_proxy = IcmpProxy::new(global_ctx.clone(), peer_manager.clone())
-            .with_context(|| "create icmp proxy failed")?;
-        let udp_proxy = UdpProxy::new(global_ctx.clone(), peer_manager.clone())
-            .with_context(|| "create udp proxy failed")?;
         Ok(IpProxy {
-            tcp_proxy,
-            icmp_proxy,
-            udp_proxy,
             global_ctx,
             started: Arc::new(AtomicBool::new(false)),
+            tcp_proxy: TcpProxy::new(peer_manager.clone(), NatDstTcpConnector {}),
+            icmp_proxy: None,
+            udp_proxy: None,
         })
     }
 
-    async fn start(&self) -> Result<(), Error> {
+    async fn start(&mut self, peer_manager: Arc<PeerManager>) -> Result<(), Error> {
         if (self.global_ctx.get_proxy_cidrs().is_empty()
             || self.global_ctx.proxy_forward_by_system()
             || self.started.load(Ordering::Relaxed))
@@ -78,16 +73,25 @@ impl IpProxy {
             return Ok(());
         }
 
+        let icmp_proxy = IcmpProxy::new(self.global_ctx.clone(), peer_manager.clone())
+            .with_context(|| "create icmp proxy failed")?;
+        let udp_proxy = UdpProxy::new(self.global_ctx.clone(), peer_manager.clone())
+            .with_context(|| "create udp proxy failed")?;
+
         self.started.store(true, Ordering::Relaxed);
         self.tcp_proxy.start(true).await?;
-        if let Err(e) = self.icmp_proxy.start().await {
+        if let Err(e) = icmp_proxy.start().await {
             tracing::error!("start icmp proxy failed: {:?}", e);
             if cfg!(not(target_os = "android")) {
                 // android may not support icmp proxy
                 return Err(e);
             }
         }
-        self.udp_proxy.start().await?;
+        udp_proxy.start().await?;
+
+        self.icmp_proxy = Some(icmp_proxy);
+        self.udp_proxy = Some(udp_proxy);
+
         Ok(())
     }
 }
@@ -539,7 +543,8 @@ impl Instance {
         if self.ip_proxy.is_none() {
             return Err(anyhow::anyhow!("ip proxy not enabled.").into());
         }
-        self.ip_proxy.as_ref().unwrap().start().await?;
+        let peer_manager = self.get_peer_manager();
+        self.ip_proxy.as_mut().unwrap().start(peer_manager).await?;
         Ok(())
     }
 
