@@ -190,7 +190,7 @@ async-compression = { version = "0.4.17", default-features = false, features = [
     "tokio",
 ] }
 
-kcp-sys = { git = "https://github.com/EasyTier/kcp-sys" }
+kcp-sys = { git = "https://github.com/EasyTier/kcp-sys", optional = true }
 
 prost-reflect = { version = "0.14.5", default-features = false, features = [
     "derive",
@@ -308,5 +308,6 @@ websocket = [
     "dep:rcgen",
 ]
 smoltcp = ["dep:smoltcp", "dep:parking_lot"]
-socks5 = ["dep:smoltcp"]
+socks5 = ["dep:smoltcp", "kcp"]
 jemalloc = ["dep:jemallocator", "dep:jemalloc-ctl", "dep:jemalloc-sys"]
+kcp = ["dep:kcp-sys"]

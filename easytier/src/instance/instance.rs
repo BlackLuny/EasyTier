@@ -19,6 +19,7 @@ use crate::connector::direct::DirectConnectorManager;
 use crate::connector::manual::{ConnectorManagerRpcService, ManualConnectorManager};
 use crate::connector::udp_hole_punch::UdpHolePunchConnector;
 use crate::gateway::icmp_proxy::IcmpProxy;
+#[cfg(feature = "kcp")]
 use crate::gateway::kcp_proxy::{KcpProxyDst, KcpProxyDstRpcService, KcpProxySrc};
 use crate::gateway::tcp_proxy::{NatDstTcpConnector, TcpProxy, TcpProxyRpcService};
 use crate::gateway::udp_proxy::UdpProxy;
@@ -175,7 +176,9 @@ pub struct Instance {
 
     ip_proxy: Option<IpProxy>,
 
+    #[cfg(feature = "kcp")]
     kcp_proxy_src: Option<KcpProxySrc>,
+    #[cfg(feature = "kcp")]
     kcp_proxy_dst: Option<KcpProxyDst>,
 
     peer_center: Arc<PeerCenterInstance>,
@@ -255,7 +258,9 @@ impl Instance {
             udp_hole_puncher: Arc::new(Mutex::new(udp_hole_puncher)),
 
             ip_proxy: None,
+            #[cfg(feature = "kcp")]
             kcp_proxy_src: None,
+            #[cfg(feature = "kcp")]
             kcp_proxy_dst: None,
 
             peer_center,
@@ -491,12 +496,14 @@ impl Instance {
             self.check_dhcp_ip_conflict();
         }
 
+        #[cfg(feature = "kcp")]
         if self.global_ctx.get_flags().enable_kcp_proxy {
             let src_proxy = KcpProxySrc::new(self.get_peer_manager()).await;
             src_proxy.start().await;
             self.kcp_proxy_src = Some(src_proxy);
         }
 
+        #[cfg(feature = "kcp")]
         if !self.global_ctx.get_flags().disable_kcp_input {
             let mut dst_proxy = KcpProxyDst::new(self.get_peer_manager()).await;
             dst_proxy.start().await;
@@ -665,6 +672,7 @@ impl Instance {
                 "tcp",
             );
         }
+        #[cfg(feature = "kcp")]
         if let Some(kcp_proxy) = self.kcp_proxy_src.as_ref() {
             s.registry().register(
                 TcpProxyRpcServer::new(TcpProxyRpcService::new(kcp_proxy.get_tcp_proxy())),
@@ -672,6 +680,7 @@ impl Instance {
             );
         }
 
+        #[cfg(feature = "kcp")]
         if let Some(kcp_proxy) = self.kcp_proxy_dst.as_ref() {
             s.registry().register(
                 TcpProxyRpcServer::new(KcpProxyDstRpcService::new(kcp_proxy)),
