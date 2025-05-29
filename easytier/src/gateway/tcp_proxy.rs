@@ -314,11 +314,13 @@ pub struct TcpProxy<C: NatDstConnector> {
     addr_conn_map: AddrConnSockMap,
 
     cidr_set: CidrSet,
-
+    #[cfg(feature = "smoltcp")]
     smoltcp_stack_sender: Option<mpsc::Sender<ZCPacket>>,
+    #[cfg(feature = "smoltcp")]
     smoltcp_stack_receiver: Arc<Mutex<Option<mpsc::Receiver<ZCPacket>>>>,
     #[cfg(feature = "smoltcp")]
     smoltcp_net: Arc<Mutex<Option<Net>>>,
+    #[cfg(feature = "smoltcp")]
     enable_smoltcp: Arc<AtomicBool>,
 
     connector: C,
@@ -328,15 +330,24 @@ pub struct TcpProxy<C: NatDstConnector> {
 impl<C: NatDstConnector> PeerPacketFilter for TcpProxy<C> {
     async fn try_process_packet_from_peer(&self, mut packet: ZCPacket) -> Option<ZCPacket> {
         if let Some(_) = self.try_handle_peer_packet(&mut packet).await {
-            if self
-                .enable_smoltcp
-                .load(std::sync::atomic::Ordering::Relaxed)
+            #[cfg(feature = "smoltcp")]
             {
-                let smoltcp_stack_sender = self.smoltcp_stack_sender.as_ref().unwrap();
-                if let Err(e) = smoltcp_stack_sender.try_send(packet) {
-                    tracing::error!("send to smoltcp stack failed: {:?}", e);
+                if self
+                    .enable_smoltcp
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let smoltcp_stack_sender = self.smoltcp_stack_sender.as_ref().unwrap();
+                    if let Err(e) = smoltcp_stack_sender.try_send(packet) {
+                        tracing::error!("send to smoltcp stack failed: {:?}", e);
+                    }
+                } else {
+                    if let Err(e) = self.peer_manager.get_nic_channel().send(packet).await {
+                        tracing::error!("send to nic failed: {:?}", e);
+                    }
                 }
-            } else {
+            }
+            #[cfg(not(feature = "smoltcp"))]
+            {
                 if let Err(e) = self.peer_manager.get_nic_channel().send(packet).await {
                     tracing::error!("send to nic failed: {:?}", e);
                 }
@@ -430,6 +441,7 @@ impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
 
 impl<C: NatDstConnector> TcpProxy<C> {
     pub fn new(peer_manager: Arc<PeerManager>, connector: C) -> Arc<Self> {
+        #[cfg(feature = "smoltcp")]
         let (smoltcp_stack_sender, smoltcp_stack_receiver) = mpsc::channel::<ZCPacket>(1000);
         let global_ctx = peer_manager.get_global_ctx();
 
@@ -446,12 +458,14 @@ impl<C: NatDstConnector> TcpProxy<C> {
 
             cidr_set: CidrSet::new(global_ctx),
 
+            #[cfg(feature = "smoltcp")]
             smoltcp_stack_sender: Some(smoltcp_stack_sender),
+            #[cfg(feature = "smoltcp")]
             smoltcp_stack_receiver: Arc::new(Mutex::new(Some(smoltcp_stack_receiver))),
 
             #[cfg(feature = "smoltcp")]
             smoltcp_net: Arc::new(Mutex::new(None)),
-
+            #[cfg(feature = "smoltcp")]
             enable_smoltcp: Arc::new(AtomicBool::new(true)),
 
             connector,
@@ -594,7 +608,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
                 tcp_listener.local_addr()?.port(),
                 std::sync::atomic::Ordering::Relaxed,
             );
-
+            #[cfg(feature = "smoltcp")]
             self.enable_smoltcp
                 .store(false, std::sync::atomic::Ordering::Relaxed);
 
@@ -787,8 +801,11 @@ impl<C: NatDstConnector> TcpProxy<C> {
     }
 
     pub fn is_smoltcp_enabled(&self) -> bool {
-        self.enable_smoltcp
-            .load(std::sync::atomic::Ordering::Relaxed)
+        #[cfg(feature = "smoltcp")]
+        return self.enable_smoltcp
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(feature = "smoltcp"))]
+        return false;
     }
 
     pub fn get_fake_local_ipv4(local_ip: &Ipv4Inet) -> Ipv4Addr {
