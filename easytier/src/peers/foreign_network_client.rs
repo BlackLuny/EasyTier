@@ -70,7 +70,7 @@ impl ForeignNetworkClient {
                     "foreign network client send msg failed"
                 );
             } else {
-                tracing::info!(
+                tracing::debug!(
                     ?peer_id,
                     ?next_hop,
                     "foreign network client send msg success"

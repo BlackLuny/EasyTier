@@ -135,6 +135,19 @@ impl PeerMap {
         Ok(())
     }
 
+    pub fn get_latency_to_peer(&self, peer_id: PeerId) -> Option<u64> {
+        let Some(peer) = self.get_peer_by_id(peer_id) else {
+            return None;
+        };
+        let default_conn_id = peer.get_default_conn_id();
+        if let Some(conn_info) = self.alive_conns.get(&(peer_id, default_conn_id)) {
+            if let Some(stats) = conn_info.stats {
+                return Some(stats.latency_us);
+            }
+        }
+        None
+    }
+
     pub async fn get_gateway_peer_id(
         &self,
         dst_peer_id: PeerId,
@@ -143,8 +156,8 @@ impl PeerMap {
         if dst_peer_id == self.my_peer_id {
             return Some(dst_peer_id);
         }
-
-        if matches!(policy, NextHopPolicy::LeastHop) && self.has_peer(dst_peer_id) {
+        let has_direct_conn = self.has_peer(dst_peer_id);
+        if matches!(policy, NextHopPolicy::LeastHop) && has_direct_conn {
             return Some(dst_peer_id);
         }
 
@@ -154,6 +167,26 @@ impl PeerMap {
                 .get_next_hop_with_policy(dst_peer_id, policy.clone())
                 .await
             {
+                if matches!(policy, NextHopPolicy::LeastCost)
+                    && has_direct_conn
+                    && gateway_peer_id != dst_peer_id
+                    && self.has_peer(gateway_peer_id)
+                {
+                    // compare latency and select direct conn if latency is abs diff less than 10% of max latency
+                    let latency_to_dst = self.get_latency_to_peer(dst_peer_id);
+                    let latency_to_gateway = self.get_latency_to_peer(gateway_peer_id);
+                    match (latency_to_dst, latency_to_gateway) {
+                        (Some(latency_to_dst), Some(latency_to_gateway)) => {
+                            let latency_thold =
+                                std::cmp::max(latency_to_dst, latency_to_gateway) as f32 * 0.1;
+                            let latency_diff = (latency_to_dst).abs_diff(latency_to_gateway) as f32;
+                            if latency_diff < latency_thold {
+                                return Some(dst_peer_id);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 // NOTIC: for foreign network, gateway_peer_id may not connect to me
                 return Some(gateway_peer_id);
             }
