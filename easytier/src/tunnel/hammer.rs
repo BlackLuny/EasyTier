@@ -6,7 +6,12 @@ use private_tun::snell_impl_ver::{
     config::get_password_from_string,
     encrypt::{EncryptReader, EncryptWriter},
 };
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpSocket, TcpStream},
+    sync::mpsc,
+    task::JoinSet,
+};
 
 use super::TunnelInfo;
 use crate::tunnel::common::setup_sokcet2;
@@ -19,57 +24,122 @@ use super::{
 
 const TCP_MTU_BYTES: usize = 2000;
 
+const HELLO_REQ_MAGIC: u32 = 0x12345678;
+
+const HELLO_RES_MAGIC: u32 = 0x98765432;
+
 #[derive(Debug)]
 pub struct HammerTunnelListener {
     addr: url::Url,
-    listener: Option<TcpListener>,
     key: [u8; 16],
     length_key: u32,
+    accepted_streams_sender: mpsc::Sender<Box<dyn Tunnel>>,
+    accepted_streams_receiver: mpsc::Receiver<Box<dyn Tunnel>>,
+    listener_task: JoinSet<()>,
 }
 
 impl HammerTunnelListener {
     pub fn new(addr: url::Url, key: &str) -> Self {
         let (key, length_key) = get_password_from_string(key).unwrap();
+        let (sender, receiver) = mpsc::channel(32);
         HammerTunnelListener {
             addr,
-            listener: None,
             key,
             length_key,
+            accepted_streams_sender: sender,
+            accepted_streams_receiver: receiver,
+            listener_task: JoinSet::new(),
         }
-    }
-
-    async fn do_accept(&mut self) -> Result<Box<dyn Tunnel>, std::io::Error> {
-        let listener = self.listener.as_ref().unwrap();
-        let (stream, _) = listener.accept().await?;
-
-        if let Err(e) = stream.set_nodelay(true) {
-            tracing::warn!(?e, "set_nodelay fail in accept");
-        }
-
-        let info = TunnelInfo {
-            tunnel_type: "hammer".to_owned(),
-            local_addr: Some(self.local_url().into()),
-            remote_addr: Some(
-                super::build_url_from_socket_addr(&stream.peer_addr()?.to_string(), "tcp").into(),
-            ),
-        };
-
-        let (r, w) = stream.into_split();
-        let encrypted_reader = EncryptReader::new(r, &self.key, self.length_key);
-        let encrypted_writer = EncryptWriter::new(w, &self.key, self.length_key);
-
-        Ok(Box::new(TunnelWrapper::new(
-            FramedReader::new(encrypted_reader, TCP_MTU_BYTES),
-            FramedWriter::new(encrypted_writer),
-            Some(info),
-        )))
     }
 }
 
+async fn do_handshake_as_server(
+    stream: TcpStream,
+    key: [u8; 16],
+    length_key: u32,
+    local_url: url::Url,
+) -> Result<Box<dyn Tunnel>, std::io::Error> {
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::warn!(?e, "set_nodelay fail in accept");
+    }
+
+    let info = TunnelInfo {
+        tunnel_type: "hammer".to_owned(),
+        local_addr: Some(local_url.into()),
+        remote_addr: Some(
+            super::build_url_from_socket_addr(&stream.peer_addr()?.to_string(), "hammer").into(),
+        ),
+    };
+
+    let (r, w) = stream.into_split();
+    let mut encrypted_reader = EncryptReader::new(r, &key, length_key);
+    let mut encrypted_writer = EncryptWriter::new(w, &key, length_key);
+
+    let hello = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        encrypted_reader.read_u32().await
+    })
+    .await??;
+    if hello != HELLO_REQ_MAGIC {
+        encrypted_writer.shutdown().await?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "hello not match",
+        ));
+    } else {
+        encrypted_writer.write_u32(HELLO_RES_MAGIC).await?;
+    }
+
+    Ok(Box::new(TunnelWrapper::new(
+        FramedReader::new(encrypted_reader, TCP_MTU_BYTES),
+        FramedWriter::new(encrypted_writer),
+        Some(info),
+    )))
+}
+
+async fn do_handshake_as_client(
+    stream: TcpStream,
+    remote_url: url::Url,
+    key: &[u8; 16],
+    length_key: u32,
+) -> Result<Box<dyn Tunnel>, std::io::Error> {
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::warn!(?e, "set_nodelay fail in accept");
+    }
+
+    let info = TunnelInfo {
+        tunnel_type: "hammer".to_owned(),
+        local_addr: Some(
+            super::build_url_from_socket_addr(&stream.local_addr()?.to_string(), "hammer").into(),
+        ),
+        remote_addr: Some(remote_url.into()),
+    };
+
+    let (r, w) = stream.into_split();
+    let mut encrypted_reader = EncryptReader::new(r, &key, length_key);
+    let mut encrypted_writer = EncryptWriter::new(w, &key, length_key);
+
+    encrypted_writer.write_u32(HELLO_REQ_MAGIC).await?;
+    encrypted_writer.flush().await?;
+    let hello_res = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        encrypted_reader.read_u32().await
+    })
+    .await??;
+    if hello_res != HELLO_RES_MAGIC {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "hello not match",
+        ));
+    }
+
+    Ok(Box::new(TunnelWrapper::new(
+        FramedReader::new(encrypted_reader, TCP_MTU_BYTES),
+        FramedWriter::new(encrypted_writer),
+        Some(info),
+    )))
+}
 #[async_trait]
 impl TunnelListener for HammerTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
-        self.listener = None;
         let addr =
             check_scheme_and_get_socket_addr::<SocketAddr>(&self.addr, "hammer", IpVersion::Both)
                 .await?;
@@ -89,29 +159,38 @@ impl TunnelListener for HammerTunnelListener {
         self.addr
             .set_port(Some(socket.local_addr()?.port()))
             .unwrap();
-
-        self.listener = Some(socket.listen(1024)?);
+        let local_url = self.addr.clone();
+        let key = self.key.clone();
+        let length_key = self.length_key;
+        let listener = socket.listen(1024)?;
+        let accepted_streams_sender = self.accepted_streams_sender.clone();
+        self.listener_task.spawn(async move {
+            loop {
+                if let Ok((stream, _)) = listener.accept().await {
+                    let url = local_url.clone();
+                    let key_clone = key.clone();
+                    let length_key_clone = length_key;
+                    let accepted_streams_sender_clone = accepted_streams_sender.clone();
+                    tokio::spawn(async move {
+                        let tun =
+                            do_handshake_as_server(stream, key_clone, length_key_clone, url).await;
+                        if let Ok(tun) = tun {
+                            let _ = accepted_streams_sender_clone.send(tun).await;
+                        }
+                    });
+                }
+            }
+        });
         Ok(())
     }
 
     async fn accept(&mut self) -> Result<Box<dyn Tunnel>, super::TunnelError> {
-        loop {
-            match self.do_accept().await {
-                Ok(ret) => return Ok(ret),
-                Err(e) => {
-                    use std::io::ErrorKind::*;
-                    if matches!(
-                        e.kind(),
-                        NotConnected | ConnectionAborted | ConnectionRefused | ConnectionReset
-                    ) {
-                        tracing::warn!(?e, "accept fail with retryable error: {:?}", e);
-                        continue;
-                    }
-                    tracing::warn!(?e, "accept fail");
-                    return Err(e.into());
-                }
-            }
-        }
+        self.accepted_streams_receiver
+            .recv()
+            .await
+            .ok_or(super::TunnelError::Anyhow(anyhow::anyhow!(
+                "receiver closed"
+            )))
     }
 
     fn local_url(&self) -> url::Url {
@@ -176,12 +255,14 @@ impl HammerTunnelConnector {
         tracing::info!(url = ?self.addr, ?addr, "connect tcp start, bind addrs: {:?}", self.bind_addrs);
         let stream = TcpStream::connect(addr).await?;
         tracing::info!(url = ?self.addr, ?addr, "connect tcp succ");
-        return get_tunnel_with_tcp_stream(
+        return do_handshake_as_client(
             stream,
             self.addr.clone().into(),
             &self.key,
             self.length_key,
-        );
+        )
+        .await
+        .map_err(|e| super::TunnelError::Anyhow(anyhow::anyhow!("handshake fail: {:?}", e)));
     }
 
     async fn connect_with_custom_bind(
@@ -207,14 +288,15 @@ impl HammerTunnelConnector {
             let socket = TcpSocket::from_std_stream(socket2_socket.into());
             futures.push(socket.connect(addr.clone()));
         }
+        if futures.is_empty() {
+            tracing::warn!(?addr, "no bind addr, use default bind");
+            return self.connect_with_default_bind(addr).await;
+        }
 
         let ret = wait_for_connect_futures(futures).await;
-        return get_tunnel_with_tcp_stream(
-            ret?,
-            self.addr.clone().into(),
-            &self.key,
-            self.length_key,
-        );
+        return do_handshake_as_client(ret?, self.addr.clone().into(), &self.key, self.length_key)
+            .await
+            .map_err(|e| super::TunnelError::Anyhow(anyhow::anyhow!("handshake fail: {:?}", e)));
     }
 }
 
@@ -333,10 +415,8 @@ mod tests {
     async fn ipv6_domain_pingpong() {
         let listener =
             HammerTunnelListener::new("hammer://[::1]:31015".parse().unwrap(), "1234567890123456");
-        let mut connector = HammerTunnelConnector::new(
-            "hammer://[::1]:31015".parse().unwrap(),
-            "1234567890123456",
-        );
+        let mut connector =
+            HammerTunnelConnector::new("hammer://[::1]:31015".parse().unwrap(), "1234567890123456");
         connector.set_ip_version(IpVersion::V6);
         _tunnel_pingpong(listener, connector).await;
 
