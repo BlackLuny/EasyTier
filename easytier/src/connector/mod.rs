@@ -153,9 +153,8 @@ pub async fn create_connector_by_url(
         "hammer" => {
             let dst_addr =
                 check_scheme_and_get_socket_addr::<SocketAddr>(&url, "hammer", ip_version).await?;
-            let nid = global_ctx.get_network_identity();
-            let mut connector =
-                HammerTunnelConnector::new(url, &nid.network_secret.unwrap_or_default());
+            let password = url.password().unwrap_or_default();
+            let mut connector = HammerTunnelConnector::new(url.clone(), &password);
             if global_ctx.config.get_flags().bind_device {
                 set_bind_addr_for_peer_connector(
                     &mut connector,

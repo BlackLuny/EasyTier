@@ -45,11 +45,8 @@ pub fn get_listener_by_url(
             Box::new(WSTunnelListener::new(l.clone()))
         }
         "hammer" => {
-            let nid = _ctx.get_network_identity();
-            Box::new(HammerTunnelListener::new(
-                l.clone(),
-                &nid.network_secret.unwrap_or_default(),
-            ))
+            let password = l.password().unwrap_or_default();
+            Box::new(HammerTunnelListener::new(l.clone(), &password))
         }
         _ => {
             return Err(Error::InvalidUrl(l.to_string()));
