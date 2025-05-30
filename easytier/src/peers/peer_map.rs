@@ -1,4 +1,8 @@
-use std::{net::Ipv4Addr, sync::Arc};
+use std::{
+    net::Ipv4Addr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use dashmap::DashMap;
@@ -21,6 +25,24 @@ use super::{
     route_trait::{ArcRoute, NextHopPolicy},
     PacketRecvChan,
 };
+struct Timed<T> {
+    update_time: Instant,
+    value: T,
+}
+impl<T> Timed<T> {
+    fn new(value: T) -> Self {
+        Self {
+            update_time: Instant::now(),
+            value,
+        }
+    }
+    fn is_expired(&self, duration: Duration) -> bool {
+        self.update_time.elapsed() > duration
+    }
+}
+struct CacheInfo {
+    route_cache: DashMap<(PeerId, NextHopPolicy), Timed<PeerId>>,
+}
 
 pub struct PeerMap {
     global_ctx: ArcGlobalCtx,
@@ -29,6 +51,7 @@ pub struct PeerMap {
     packet_send: PacketRecvChainPair,
     routes: RwLock<Vec<ArcRoute>>,
     alive_conns: Arc<DashMap<(PeerId, PeerConnId), PeerConnInfo>>,
+    cache_info: CacheInfo,
 }
 
 impl PeerMap {
@@ -46,6 +69,9 @@ impl PeerMap {
             packet_send,
             routes: RwLock::new(Vec::new()),
             alive_conns: Arc::new(DashMap::new()),
+            cache_info: CacheInfo {
+                route_cache: DashMap::new(),
+            },
         }
     }
 
@@ -161,6 +187,15 @@ impl PeerMap {
             return Some(dst_peer_id);
         }
 
+        let cache_info = self
+            .cache_info
+            .route_cache
+            .get(&(dst_peer_id, policy.clone()));
+        if let Some(cache_info) = cache_info {
+            if !cache_info.is_expired(Duration::from_secs(10)) {
+                return Some(cache_info.value);
+            }
+        }
         // get route info
         for route in self.routes.read().await.iter() {
             if let Some(gateway_peer_id) = route
@@ -181,6 +216,9 @@ impl PeerMap {
                                 std::cmp::max(latency_to_dst, latency_to_gateway) as f32 * 0.1;
                             let latency_diff = (latency_to_dst).abs_diff(latency_to_gateway) as f32;
                             if latency_diff < latency_thold {
+                                self.cache_info
+                                    .route_cache
+                                    .insert((dst_peer_id, policy.clone()), Timed::new(dst_peer_id));
                                 return Some(dst_peer_id);
                             }
                         }
@@ -188,6 +226,9 @@ impl PeerMap {
                     }
                 }
                 // NOTIC: for foreign network, gateway_peer_id may not connect to me
+                self.cache_info
+                    .route_cache
+                    .insert((dst_peer_id, policy.clone()), Timed::new(gateway_peer_id));
                 return Some(gateway_peer_id);
             }
         }

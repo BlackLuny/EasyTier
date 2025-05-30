@@ -12,7 +12,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum NextHopPolicy {
     LeastHop,
     LeastCost,
