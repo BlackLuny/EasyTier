@@ -818,10 +818,28 @@ impl PeerManager {
     ) -> Result<(), Error> {
         let policy =
             Self::get_next_hop_policy(msg.peer_manager_header().unwrap().is_latency_first());
-
+        let now = Instant::now();
         if let Some(gateway) = peers.get_gateway_peer_id(dst_peer_id, policy.clone()).await {
+            if now.elapsed().as_millis() > 10 {
+                tracing::warn!(
+                    ?gateway,
+                    ?dst_peer_id,
+                    "get_gateway_peer_id using too much time: {:?}",
+                    now.elapsed()
+                );
+            }
             if peers.has_peer(gateway) {
-                peers.send_msg_directly(msg, gateway).await
+                let now = Instant::now();
+                let r = peers.send_msg_directly(msg, gateway).await;
+                if now.elapsed().as_millis() > 10 {
+                    tracing::warn!(
+                        ?gateway,
+                        ?dst_peer_id,
+                        "send_msg_directly using too much time: {:?}",
+                        now.elapsed()
+                    );
+                }
+                return r;
             } else if foreign_network_client.has_next_hop(gateway) {
                 foreign_network_client.send_msg(msg, gateway).await
             } else {

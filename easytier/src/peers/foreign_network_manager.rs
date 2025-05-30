@@ -12,6 +12,7 @@ use std::{
 
 use dashmap::DashMap;
 use tokio::{
+    select,
     sync::{
         mpsc::{self, UnboundedReceiver, UnboundedSender},
         Mutex,
@@ -68,7 +69,7 @@ struct ForeignNetworkEntry {
     rpc_sender: UnboundedSender<ZCPacket>,
 
     packet_recv: Mutex<Option<PacketRecvChanReceiver>>,
-
+    ctl_packet_recv: Mutex<Option<PacketRecvChanReceiver>>,
     tasks: Mutex<JoinSet<()>>,
 }
 
@@ -83,9 +84,10 @@ impl ForeignNetworkEntry {
         let foreign_global_ctx = Self::build_foreign_global_ctx(&network, global_ctx.clone());
 
         let (packet_sender, packet_recv) = create_packet_recv_chan();
+        let (ctl_packet_sender, ctl_packet_recv) = create_packet_recv_chan();
         let peer_map = Arc::new(PeerMap::new(
             packet_sender,
-            None,
+            Some(ctl_packet_sender),
             foreign_global_ctx.clone(),
             my_peer_id,
         ));
@@ -112,6 +114,7 @@ impl ForeignNetworkEntry {
             rpc_sender: rpc_transport_sender,
 
             packet_recv: Mutex::new(Some(packet_recv)),
+            ctl_packet_recv: Mutex::new(Some(ctl_packet_recv)),
 
             tasks: Mutex::new(JoinSet::new()),
         }
@@ -254,6 +257,7 @@ impl ForeignNetworkEntry {
 
     async fn start_packet_recv(&self) {
         let mut recv = self.packet_recv.lock().await.take().unwrap();
+        let mut ctl_recv = self.ctl_packet_recv.lock().await.take().unwrap();
         let my_node_id = self.my_peer_id;
         let rpc_sender = self.rpc_sender.clone();
         let peer_map = self.peer_map.clone();
@@ -262,7 +266,11 @@ impl ForeignNetworkEntry {
         let network_name = self.network.network_name.clone();
 
         self.tasks.lock().await.spawn(async move {
-            while let Ok(zc_packet) = recv_packet_from_chan(&mut recv).await {
+            while let Ok(zc_packet) = select! {
+                biased;
+                ret = recv_packet_from_chan(&mut recv) => ret,
+                ret = recv_packet_from_chan(&mut ctl_recv) => ret,
+            } {
                 let Some(hdr) = zc_packet.peer_manager_header() else {
                     tracing::warn!("invalid packet, skip");
                     continue;
