@@ -29,6 +29,7 @@ use crate::{
         global_ctx::ArcGlobalCtx,
         PeerId,
     },
+    peers::PacketRecvChainPair,
     proto::{
         cli::{PeerConnInfo, PeerConnStats},
         common::TunnelInfo,
@@ -43,7 +44,7 @@ use crate::{
     },
 };
 
-use super::{peer_conn_ping::PeerConnPinger, PacketRecvChan};
+use super::peer_conn_ping::PeerConnPinger;
 
 pub type PeerConnId = uuid::Uuid;
 
@@ -301,10 +302,9 @@ impl PeerConn {
         self.info.is_some()
     }
 
-    pub async fn start_recv_loop(&mut self, packet_recv_chan: PacketRecvChan) {
+    pub async fn start_recv_loop(&mut self, packet_recv_chain_pair: PacketRecvChainPair) {
         let mut stream = self.recv.lock().await.take().unwrap();
         let sink = self.sink.clone();
-        let sender = packet_recv_chan.clone();
         let close_event_notifier = self.close_event_notifier.clone();
         let ctrl_sender = self.ctrl_resp_sender.clone();
         let conn_info_for_instrument = self.get_conn_info();
@@ -329,6 +329,17 @@ impl PeerConn {
                         );
                         continue;
                     };
+                    // 优先处理数据包
+                    if peer_mgr_hdr.packet_type == PacketType::Data as u8 {
+                        if let Err(_) = packet_recv_chain_pair
+                            .get_data_packet_recv_chan()
+                            .send(zc_packet)
+                            .await
+                        {
+                            break;
+                        }
+                        continue;
+                    }
 
                     if peer_mgr_hdr.packet_type == PacketType::Ping as u8 {
                         peer_mgr_hdr.packet_type = PacketType::Pong as u8;
@@ -341,7 +352,12 @@ impl PeerConn {
                         }
                     } else {
                         // 发送给peer manager
-                        if sender.send(zc_packet).await.is_err() {
+                        if packet_recv_chain_pair
+                            .get_ctl_packet_recv_chan()
+                            .send(zc_packet)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -536,7 +552,9 @@ mod tests {
             s_peer.do_handshake_as_server()
         );
 
-        s_peer.start_recv_loop(create_packet_recv_chan().0).await;
+        s_peer
+            .start_recv_loop(PacketRecvChainPair::new(create_packet_recv_chan().0, None))
+            .await;
         // do not start ping for s, s only reponde to ping from c
 
         assert!(c_ret.is_ok());
@@ -544,7 +562,9 @@ mod tests {
 
         let close_notifier = c_peer.get_close_notifier();
         c_peer.start_pingpong();
-        c_peer.start_recv_loop(create_packet_recv_chan().0).await;
+        c_peer
+            .start_recv_loop(PacketRecvChainPair::new(create_packet_recv_chan().0, None))
+            .await;
 
         let throughput = c_peer.throughput.clone();
         let _t = ScopedTask::from(tokio::spawn(async move {

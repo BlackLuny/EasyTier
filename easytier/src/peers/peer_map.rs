@@ -10,6 +10,7 @@ use crate::{
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity},
         PeerId,
     },
+    peers::PacketRecvChainPair,
     proto::{cli::PeerConnInfo, common::PeerFeatureFlag},
     tunnel::{packet_def::ZCPacket, TunnelError},
 };
@@ -25,13 +26,19 @@ pub struct PeerMap {
     global_ctx: ArcGlobalCtx,
     my_peer_id: PeerId,
     peer_map: DashMap<PeerId, Arc<Peer>>,
-    packet_send: PacketRecvChan,
+    packet_send: PacketRecvChainPair,
     routes: RwLock<Vec<ArcRoute>>,
     alive_conns: Arc<DashMap<(PeerId, PeerConnId), PeerConnInfo>>,
 }
 
 impl PeerMap {
-    pub fn new(packet_send: PacketRecvChan, global_ctx: ArcGlobalCtx, my_peer_id: PeerId) -> Self {
+    pub fn new(
+        data_packet_send: PacketRecvChan,
+        ctl_packet_send: Option<PacketRecvChan>,
+        global_ctx: ArcGlobalCtx,
+        my_peer_id: PeerId,
+    ) -> Self {
+        let packet_send = PacketRecvChainPair::new(data_packet_send, ctl_packet_send);
         PeerMap {
             global_ctx,
             my_peer_id,
@@ -98,8 +105,10 @@ impl PeerMap {
     pub async fn send_msg_directly(&self, msg: ZCPacket, dst_peer_id: PeerId) -> Result<(), Error> {
         if dst_peer_id == self.my_peer_id {
             let packet_send = self.packet_send.clone();
+            // TODO: use data or ctl packet send chan?
             tokio::spawn(async move {
                 let ret = packet_send
+                    .get_data_packet_recv_chan()
                     .send(msg)
                     .await
                     .with_context(|| "send msg to self failed");

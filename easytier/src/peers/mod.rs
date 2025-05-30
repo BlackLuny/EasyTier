@@ -61,3 +61,34 @@ pub async fn recv_packet_from_chan(
         .await
         .ok_or(anyhow::anyhow!("recv_packet_from_chan failed"))
 }
+
+#[derive(Clone)]
+pub enum PacketRecvChainPair {
+    Single(PacketRecvChan),
+    Double(PacketRecvChan, PacketRecvChan),
+}
+
+impl PacketRecvChainPair {
+    pub fn new(
+        data_packet_recv_chan: PacketRecvChan,
+        ctl_packet_recv_chan: Option<PacketRecvChan>,
+    ) -> Self {
+        if let Some(ctl_packet_recv_chan) = ctl_packet_recv_chan {
+            Self::Double(data_packet_recv_chan, ctl_packet_recv_chan)
+        } else {
+            Self::Single(data_packet_recv_chan)
+        }
+    }
+    pub fn get_data_packet_recv_chan(&self) -> &PacketRecvChan {
+        match self {
+            Self::Single(data_packet_recv_chan) => data_packet_recv_chan,
+            Self::Double(data_packet_recv_chan, _) => data_packet_recv_chan,
+        }
+    }
+    pub fn get_ctl_packet_recv_chan(&self) -> &PacketRecvChan {
+        match self {
+            Self::Single(r) => r,
+            Self::Double(_, ctl_packet_recv_chan) => ctl_packet_recv_chan,
+        }
+    }
+}

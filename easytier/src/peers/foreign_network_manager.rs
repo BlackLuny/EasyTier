@@ -83,9 +83,9 @@ impl ForeignNetworkEntry {
         let foreign_global_ctx = Self::build_foreign_global_ctx(&network, global_ctx.clone());
 
         let (packet_sender, packet_recv) = create_packet_recv_chan();
-
         let peer_map = Arc::new(PeerMap::new(
             packet_sender,
+            None,
             foreign_global_ctx.clone(),
             my_peer_id,
         ));

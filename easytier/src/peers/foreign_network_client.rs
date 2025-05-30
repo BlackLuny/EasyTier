@@ -25,6 +25,7 @@ impl ForeignNetworkClient {
     ) -> Self {
         let peer_map = Arc::new(PeerMap::new(
             packet_sender_to_mgr,
+            None,
             global_ctx.clone(),
             my_peer_id,
         ));

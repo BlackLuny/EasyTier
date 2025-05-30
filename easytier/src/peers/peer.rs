@@ -7,11 +7,10 @@ use tokio::{select, sync::mpsc, task::JoinHandle};
 
 use tracing::Instrument;
 
-use super::{
-    peer_conn::{PeerConn, PeerConnId},
-    PacketRecvChan,
+use super::peer_conn::{PeerConn, PeerConnId};
+use crate::{
+    common::scoped_task::ScopedTask, peers::PacketRecvChainPair, proto::cli::PeerConnInfo,
 };
-use crate::{common::scoped_task::ScopedTask, proto::cli::PeerConnInfo};
 use crate::{
     common::{
         error::Error,
@@ -29,7 +28,7 @@ pub struct Peer {
     conns: ConnMap,
     global_ctx: ArcGlobalCtx,
 
-    packet_recv_chan: PacketRecvChan,
+    packet_recv_chain_pair: PacketRecvChainPair,
 
     close_event_sender: mpsc::Sender<PeerConnId>,
     close_event_listener: JoinHandle<()>,
@@ -43,7 +42,7 @@ pub struct Peer {
 impl Peer {
     pub fn new(
         peer_node_id: PeerId,
-        packet_recv_chan: PacketRecvChan,
+        packet_recv_chain_pair: PacketRecvChainPair,
         global_ctx: ArcGlobalCtx,
     ) -> Self {
         let conns: ConnMap = Arc::new(DashMap::new());
@@ -105,7 +104,7 @@ impl Peer {
         Peer {
             peer_node_id,
             conns: conns.clone(),
-            packet_recv_chan,
+            packet_recv_chain_pair,
             global_ctx,
 
             close_event_sender,
@@ -130,7 +129,8 @@ impl Peer {
             }
         });
 
-        conn.start_recv_loop(self.packet_recv_chan.clone()).await;
+        conn.start_recv_loop(self.packet_recv_chain_pair.clone())
+            .await;
         conn.start_pingpong();
 
         self.global_ctx
@@ -211,7 +211,7 @@ mod tests {
 
     use crate::{
         common::{global_ctx::tests::get_mock_global_ctx, new_peer_id},
-        peers::{create_packet_recv_chan, peer_conn::PeerConn},
+        peers::{create_packet_recv_chan, peer_conn::PeerConn, PacketRecvChainPair},
         tunnel::ring::create_ring_tunnel_pair,
     };
 
@@ -222,8 +222,16 @@ mod tests {
         let (local_packet_send, _local_packet_recv) = create_packet_recv_chan();
         let (remote_packet_send, _remote_packet_recv) = create_packet_recv_chan();
         let global_ctx = get_mock_global_ctx();
-        let local_peer = Peer::new(new_peer_id(), local_packet_send, global_ctx.clone());
-        let remote_peer = Peer::new(new_peer_id(), remote_packet_send, global_ctx.clone());
+        let local_peer = Peer::new(
+            new_peer_id(),
+            PacketRecvChainPair::new(local_packet_send, None),
+            global_ctx.clone(),
+        );
+        let remote_peer = Peer::new(
+            new_peer_id(),
+            PacketRecvChainPair::new(remote_packet_send, None),
+            global_ctx.clone(),
+        );
 
         let (local_tunnel, remote_tunnel) = create_ring_tunnel_pair();
         let mut local_peer_conn =

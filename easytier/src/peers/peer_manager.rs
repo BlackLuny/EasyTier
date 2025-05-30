@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 
 use tokio::{
+    select,
     sync::{
         mpsc::{self, UnboundedReceiver, UnboundedSender},
         Mutex, RwLock,
@@ -123,6 +124,7 @@ pub struct PeerManager {
     tasks: Mutex<JoinSet<()>>,
 
     packet_recv: Arc<Mutex<Option<PacketRecvChanReceiver>>>,
+    ctl_packet_recv: Arc<Mutex<Option<PacketRecvChanReceiver>>>,
 
     peers: Arc<PeerMap>,
 
@@ -165,8 +167,10 @@ impl PeerManager {
         let my_peer_id = rand::random();
 
         let (packet_send, packet_recv) = create_packet_recv_chan();
+        let (ctl_packet_send, ctl_packet_recv) = create_packet_recv_chan();
         let peers = Arc::new(PeerMap::new(
             packet_send.clone(),
+            Some(ctl_packet_send),
             global_ctx.clone(),
             my_peer_id,
         ));
@@ -252,6 +256,7 @@ impl PeerManager {
             tasks: Mutex::new(JoinSet::new()),
 
             packet_recv: Arc::new(Mutex::new(Some(packet_recv))),
+            ctl_packet_recv: Arc::new(Mutex::new(Some(ctl_packet_recv))),
 
             peers: peers.clone(),
 
@@ -495,6 +500,7 @@ impl PeerManager {
 
     async fn start_peer_recv(&self) {
         let mut recv = self.packet_recv.lock().await.take().unwrap();
+        let mut ctl_recv = self.ctl_packet_recv.lock().await.take().unwrap();
         let my_peer_id = self.my_peer_id;
         let peers = self.peers.clone();
         let pipe_line = self.peer_packet_process_pipeline.clone();
@@ -504,7 +510,11 @@ impl PeerManager {
         let compress_algo = self.data_compress_algo;
         self.tasks.lock().await.spawn(async move {
             tracing::trace!("start_peer_recv");
-            while let Ok(ret) = recv_packet_from_chan(&mut recv).await {
+            while let Ok(ret) = select! {
+                biased;
+                ret = recv_packet_from_chan(&mut recv) => ret,
+                ret = recv_packet_from_chan(&mut ctl_recv) => ret,
+            } {
                 let Err(mut ret) =
                     Self::try_handle_foreign_network_packet(ret, my_peer_id, &peers, &foreign_mgr)
                         .await
