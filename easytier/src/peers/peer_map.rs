@@ -74,16 +74,16 @@ impl PeerMap {
         let close_notifier = peer_conn.get_close_notifier();
         let alive_conns_weak = Arc::downgrade(&self.alive_conns);
         let conn_id = close_notifier.get_conn_id();
-        let conn_info = peer_conn.get_conn_info();
+        let peer_id = peer_conn.get_peer_id();
         self.alive_conns
-            .insert((conn_info.peer_id, conn_id.clone()), conn_info.clone());
+            .insert((peer_id, conn_id.clone()), peer_conn.get_conn_info());
         tokio::spawn(async move {
             if let Some(mut waiter) = close_notifier.get_waiter().await {
                 let _ = waiter.recv().await;
             }
             let mut alive_conn_count = 0;
             if let Some(alive_conns) = alive_conns_weak.upgrade() {
-                alive_conns.remove(&(conn_info.peer_id, conn_id)).unwrap();
+                alive_conns.remove(&(peer_id, conn_id)).unwrap();
                 alive_conn_count = alive_conns.len();
             }
             tracing::debug!(
