@@ -87,6 +87,7 @@ async fn do_handshake_as_server(
         ));
     } else {
         encrypted_writer.write_u32(HELLO_RES_MAGIC).await?;
+        encrypted_writer.flush().await?;
     }
 
     Ok(Box::new(TunnelWrapper::new(
