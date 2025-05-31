@@ -617,6 +617,14 @@ impl RouteTable {
             .map(|x| NatType::try_from(x.udp_stun_info as i32).unwrap_or_default())
     }
 
+    fn get_update_time(&self, peer_id: PeerId) -> Option<SystemTime> {
+        self.peer_infos
+            .get(&peer_id)
+            .map(|x| x.last_update.map(|y| SystemTime::try_from(y).ok()))
+            .flatten()
+            .flatten()
+    }
+
     fn build_peer_graph_from_synced_info<T: RouteCostCalculatorInterface>(
         peers: Vec<PeerId>,
         synced_info: &SyncedRouteInfo,
@@ -730,6 +738,7 @@ impl RouteTable {
         idx_map: &PeerIdToNodexIdxMap,
     ) -> NextHopMap {
         let next_hop_map = NextHopMap::new();
+        let my_node_idx = *idx_map.get(&my_peer_id).unwrap();
         for item in idx_map.iter() {
             if *item.key() == my_peer_id {
                 continue;
@@ -739,7 +748,7 @@ impl RouteTable {
 
             let Some((cost, path)) = astar::astar(
                 graph,
-                *idx_map.get(&my_peer_id).unwrap(),
+                my_node_idx,
                 |node_idx| node_idx == dst_peer_node_idx,
                 |e| *e.weight(),
                 |_| 0,
@@ -812,6 +821,8 @@ impl RouteTable {
         // build ipv4_peer_id_map, cidr_peer_id_map
         self.ipv4_peer_id_map.clear();
         self.cidr_peer_id_map.clear();
+
+        let mut to_remove = Vec::new();
         for item in self.peer_infos.iter() {
             // only set ipv4 map for peers we can reach.
             if !self.next_hop_map.contains_key(item.key()) {
@@ -822,13 +833,63 @@ impl RouteTable {
             let info = item.value();
 
             if let Some(ipv4_addr) = info.ipv4_addr {
-                self.ipv4_peer_id_map.insert(ipv4_addr.into(), *peer_id);
+                if let Some(prev_peer_id) = self.ipv4_peer_id_map.insert(ipv4_addr.into(), *peer_id)
+                {
+                    tracing::warn!(
+                        ?ipv4_addr,
+                        ?prev_peer_id,
+                        ?peer_id,
+                        "ipv4_peer_id_map collision"
+                    );
+                    if let Some(prev_update_time) = self.get_update_time(prev_peer_id) {
+                        if let Some(cur_update_time) = item
+                            .last_update
+                            .map(|y| SystemTime::try_from(y).ok())
+                            .flatten()
+                        {
+                            if prev_update_time > cur_update_time {
+                                // if prev_peer_id is newer, we should keep it.
+                                self.ipv4_peer_id_map.insert(ipv4_addr.into(), prev_peer_id);
+                                to_remove.push(*peer_id);
+                            } else {
+                                to_remove.push(prev_peer_id);
+                            }
+                        }
+                    }
+                }
             }
 
             for cidr in info.proxy_cidrs.iter() {
-                self.cidr_peer_id_map
-                    .insert(cidr.parse().unwrap(), *peer_id);
+                if let Some(prev_peer_id) = self
+                    .cidr_peer_id_map
+                    .insert(cidr.parse().unwrap(), *peer_id)
+                {
+                    tracing::warn!(
+                        ?cidr,
+                        ?prev_peer_id,
+                        ?peer_id,
+                        "cidr_peer_id_map collision"
+                    );
+                    if let Some(prev_update_time) = self.get_update_time(prev_peer_id) {
+                        if let Some(cur_update_time) = item
+                            .last_update
+                            .map(|y| SystemTime::try_from(y).ok())
+                            .flatten()
+                        {
+                            if prev_update_time > cur_update_time {
+                                self.cidr_peer_id_map
+                                    .insert(cidr.parse().unwrap(), prev_peer_id);
+                                to_remove.push(*peer_id);
+                            } else {
+                                to_remove.push(prev_peer_id);
+                            }
+                        }
+                    }
+                }
             }
+        }
+        for peer_id in to_remove.iter() {
+            synced_info.remove_peer(*peer_id);
         }
     }
 
