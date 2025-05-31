@@ -847,7 +847,9 @@ impl RouteTable {
                             .map(|y| SystemTime::try_from(y).ok())
                             .flatten()
                         {
-                            if prev_update_time > cur_update_time {
+                            if prev_update_time > cur_update_time
+                                && self.next_hop_map.contains_key(&prev_peer_id)
+                            {
                                 // if prev_peer_id is newer, we should keep it.
                                 self.ipv4_peer_id_map.insert(ipv4_addr.into(), prev_peer_id);
                                 to_remove.push(*peer_id);
@@ -864,19 +866,16 @@ impl RouteTable {
                     .cidr_peer_id_map
                     .insert(cidr.parse().unwrap(), *peer_id)
                 {
-                    tracing::warn!(
-                        ?cidr,
-                        ?prev_peer_id,
-                        ?peer_id,
-                        "cidr_peer_id_map collision"
-                    );
+                    tracing::warn!(?cidr, ?prev_peer_id, ?peer_id, "cidr_peer_id_map collision");
                     if let Some(prev_update_time) = self.get_update_time(prev_peer_id) {
                         if let Some(cur_update_time) = item
                             .last_update
                             .map(|y| SystemTime::try_from(y).ok())
                             .flatten()
                         {
-                            if prev_update_time > cur_update_time {
+                            if prev_update_time > cur_update_time
+                                && self.next_hop_map.contains_key(&prev_peer_id)
+                            {
                                 self.cidr_peer_id_map
                                     .insert(cidr.parse().unwrap(), prev_peer_id);
                                 to_remove.push(*peer_id);
@@ -889,7 +888,9 @@ impl RouteTable {
             }
         }
         for peer_id in to_remove.iter() {
-            synced_info.remove_peer(*peer_id);
+            if *peer_id != my_peer_id {
+                synced_info.remove_peer(*peer_id);
+            }
         }
     }
 
