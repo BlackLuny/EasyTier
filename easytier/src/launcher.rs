@@ -261,10 +261,18 @@ impl EasyTierLauncher {
 
         self.thread_handle = Some(std::thread::spawn(move || {
             let rt = if cfg.get_flags().multi_thread {
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .build()
+                let num_cores = std::thread::available_parallelism()
+                    .map(|x| x.get())
+                    .unwrap_or(1);
+                if num_cores > 1 {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                } else {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                }
             } else {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()

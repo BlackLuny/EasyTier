@@ -64,8 +64,6 @@ use super::{
 struct RpcTransport {
     my_peer_id: PeerId,
     peers: Weak<PeerMap>,
-    // TODO: this seems can be removed
-    foreign_peers: Mutex<Option<Weak<ForeignNetworkClient>>>,
 
     packet_recv: Mutex<UnboundedReceiver<ZCPacket>>,
     peer_rpc_tspt_sender: UnboundedSender<ZCPacket>,
@@ -209,7 +207,6 @@ impl PeerManager {
         let rpc_tspt = Arc::new(RpcTransport {
             my_peer_id,
             peers: Arc::downgrade(&peers),
-            foreign_peers: Mutex::new(None),
             packet_recv: Mutex::new(peer_rpc_tspt_recv),
             peer_rpc_tspt_sender,
             encryptor: encryptor.clone(),
@@ -620,7 +617,12 @@ impl PeerManager {
                 if hdr.packet_type == PacketType::Data as u8 {
                     tracing::trace!(?packet, "send packet to nic channel");
                     // TODO: use a function to get the body ref directly for zero copy
-                    let _ = self.nic_channel.send(packet).await;
+                    match self.nic_channel.try_send(packet) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::error!(?e, "nic channel send failed");
+                        }
+                    }
                     None
                 } else {
                     Some(packet)
@@ -974,12 +976,6 @@ impl PeerManager {
     }
 
     async fn run_foriegn_network(&self) {
-        self.peer_rpc_tspt
-            .foreign_peers
-            .lock()
-            .await
-            .replace(Arc::downgrade(&self.foreign_network_client));
-
         self.foreign_network_client.run().await;
     }
 
