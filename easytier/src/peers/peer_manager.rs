@@ -504,9 +504,7 @@ impl PeerManager {
         }
     }
 
-    async fn start_peer_recv(&self) {
-        let mut recv = self.packet_recv.lock().await.take().unwrap();
-        let mut ctl_recv = self.ctl_packet_recv.lock().await.take().unwrap();
+    async fn start_peer_recv_for_channel(&self, mut recv: PacketRecvChanReceiver) {
         let my_peer_id = self.my_peer_id;
         let peers = self.peers.clone();
         let pipe_line = self.peer_packet_process_pipeline.clone();
@@ -516,11 +514,7 @@ impl PeerManager {
         let compress_algo = self.data_compress_algo;
         self.tasks.lock().await.spawn(async move {
             tracing::trace!("start_peer_recv");
-            while let Ok(ret) = select! {
-                biased;
-                ret = recv_packet_from_chan(&mut recv) => ret,
-                ret = recv_packet_from_chan(&mut ctl_recv) => ret,
-            } {
+            while let Ok(ret) = recv_packet_from_chan(&mut recv).await {
                 let Err(mut ret) =
                     Self::try_handle_foreign_network_packet(ret, my_peer_id, &peers, &foreign_mgr)
                         .await
@@ -1001,7 +995,10 @@ impl PeerManager {
         self.init_packet_process_pipeline().await;
         self.peer_rpc_mgr.run();
 
-        self.start_peer_recv().await;
+        let recv = self.packet_recv.lock().await.take().unwrap();
+        let ctl_recv = self.ctl_packet_recv.lock().await.take().unwrap();
+        self.start_peer_recv_for_channel(recv).await;
+        self.start_peer_recv_for_channel(ctl_recv).await;
         self.run_clean_peer_without_conn_routine().await;
 
         self.run_foriegn_network().await;

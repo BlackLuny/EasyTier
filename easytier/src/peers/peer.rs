@@ -125,9 +125,7 @@ impl Peer {
         {
             let guard = self.default_conn.read().unwrap();
             if let Some(conn) = &*guard {
-                if conn.is_expired(std::time::Duration::from_secs(5)) {
-                    *self.default_conn.write().unwrap() = None;
-                } else {
+                if !conn.is_expired(std::time::Duration::from_secs(5)) {
                     return Some(conn.get().clone());
                 }
             }
