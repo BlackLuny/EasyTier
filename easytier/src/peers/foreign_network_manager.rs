@@ -228,7 +228,7 @@ impl ForeignNetworkEntry {
                     .accessor
                     .list_global_foreign_peer(&self.network_identity)
                     .await;
-                let local = peer_map.list_peers_with_conn().await;
+                let local = peer_map.list_peers_with_conn();
                 global.extend(local.iter().cloned());
                 global
                     .into_iter()
@@ -371,7 +371,7 @@ impl ForeignNetworkManagerData {
         }
     }
 
-    async fn clear_no_conn_peer(&self, network_name: &String) {
+    fn clear_no_conn_peer(&self, network_name: &String) {
         let Some(peer_map) = self
             .network_peer_maps
             .get(network_name)
@@ -379,7 +379,7 @@ impl ForeignNetworkManagerData {
         else {
             return;
         };
-        peer_map.clean_peer_without_conn().await;
+        peer_map.clean_peer_without_conn();
     }
 
     fn remove_network(&self, network_name: &String) {
@@ -534,7 +534,7 @@ impl ForeignNetworkManager {
                     }
                     GlobalCtxEvent::PeerConnRemoved(..) => {
                         tracing::info!(?e, "clear no conn peer from foreign network manager");
-                        data.clear_no_conn_peer(&network_name).await;
+                        data.clear_no_conn_peer(&network_name);
                     }
                     GlobalCtxEvent::PeerAdded(_) => {
                         tracing::info!(?e, "add peer to foreign network manager");
@@ -550,7 +550,7 @@ impl ForeignNetworkManager {
         });
     }
 
-    pub async fn list_foreign_networks(&self) -> ListForeignNetworkResponse {
+    pub fn list_foreign_networks(&self) -> ListForeignNetworkResponse {
         let mut ret = ListForeignNetworkResponse::default();
         let networks = self
             .data
@@ -577,10 +577,10 @@ impl ForeignNetworkManager {
                     .to_vec(),
                 ..Default::default()
             };
-            for peer in item.peer_map.list_peers().await {
+            for peer in item.peer_map.list_peers() {
                 let mut peer_info = PeerInfo::default();
                 peer_info.peer_id = peer;
-                peer_info.conns = item.peer_map.list_peer_conns(peer).await.unwrap_or(vec![]);
+                peer_info.conns = item.peer_map.list_peer_conns(peer).unwrap_or(vec![]);
                 entry.peers.push(peer_info);
             }
 
@@ -686,8 +686,7 @@ mod tests {
 
         let rpc_resp = pm_center
             .get_foreign_network_manager()
-            .list_foreign_networks()
-            .await;
+            .list_foreign_networks();
         assert_eq!(1, rpc_resp.foreign_networks.len());
         assert_eq!(2, rpc_resp.foreign_networks["net1"].peers.len());
     }
@@ -782,7 +781,6 @@ mod tests {
                 .get_foreign_network_client()
                 .get_peer_map()
                 .list_peers()
-                .await
         );
         assert_eq!(
             vec![pm_center.my_peer_id()],
@@ -790,7 +788,6 @@ mod tests {
                 .get_foreign_network_client()
                 .get_peer_map()
                 .list_peers()
-                .await
         );
 
         assert_eq!(2, pma_net1.list_routes().await.len());
@@ -843,8 +840,7 @@ mod tests {
 
         let rpc_resp = pm_center
             .get_foreign_network_manager()
-            .list_foreign_networks()
-            .await;
+            .list_foreign_networks();
         assert_eq!(2, rpc_resp.foreign_networks.len());
         assert_eq!(3, rpc_resp.foreign_networks["net1"].peers.len());
         assert_eq!(2, rpc_resp.foreign_networks["net2"].peers.len());

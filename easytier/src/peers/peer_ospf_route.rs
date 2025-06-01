@@ -2537,7 +2537,6 @@ mod tests {
                 routable_peer
                     .get_peer_map()
                     .list_peers()
-                    .await
                     .into_iter()
                     .collect::<BTreeSet<PeerId>>()
             );
@@ -2621,7 +2620,6 @@ mod tests {
 
         p_a.get_peer_map()
             .close_peer(p_b.my_peer_id())
-            .await
             .unwrap();
         wait_for_condition(
             || async { r_a.list_routes().await.len() == 0 },

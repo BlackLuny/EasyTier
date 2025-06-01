@@ -67,7 +67,7 @@ impl PeerManagerForDirectConnector for PeerManager {
     }
 
     async fn list_peer_conns(&self, peer_id: PeerId) -> Option<Vec<PeerConnInfo>> {
-        self.get_peer_map().list_peer_conns(peer_id).await
+        self.get_peer_map().list_peer_conns(peer_id)
     }
 
     fn get_peer_rpc_mgr(&self) -> Arc<PeerRpcManager> {
@@ -93,6 +93,15 @@ impl DirectConnectorManagerData {
             global_ctx,
             peer_manager,
             dst_listener_blacklist: timedmap::TimedMap::new(),
+        }
+    }
+
+    fn has_directly_connected_conn(&self, dst_peer_id: PeerId) -> bool {
+        if self.global_ctx.get_flags().try_connect_as_client {
+            self.peer_manager
+                .has_directly_connected_conn_as_client(dst_peer_id)
+        } else {
+            self.peer_manager.has_directly_connected_conn(dst_peer_id)
         }
     }
 
@@ -246,7 +255,7 @@ impl DirectConnectorManagerData {
         }
 
         loop {
-            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
+            if self.has_directly_connected_conn(dst_peer_id) {
                 return Ok(());
             }
 
@@ -257,7 +266,7 @@ impl DirectConnectorManagerData {
                 return Ok(());
             }
 
-            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
+            if self.has_directly_connected_conn(dst_peer_id) {
                 return Ok(());
             }
 
@@ -450,7 +459,7 @@ impl DirectConnectorManagerData {
                 "all tasks finished for current scheme"
             );
 
-            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
+            if self.has_directly_connected_conn(dst_peer_id) {
                 tracing::info!(
                     "direct connect to peer {} success, has direct conn",
                     dst_peer_id
@@ -494,7 +503,7 @@ impl DirectConnectorManagerData {
                 .await;
             tracing::info!(?ret, ?dst_peer_id, "do_try_direct_connect return");
 
-            if peer_manager.has_directly_connected_conn(dst_peer_id) {
+            if self.has_directly_connected_conn(dst_peer_id) {
                 tracing::info!(
                     "direct connect to peer {} success, has direct conn",
                     dst_peer_id
@@ -542,7 +551,7 @@ impl PeerTaskLauncher for DirectConnectorLauncher {
             .await
             .into_iter()
             .filter(|peer_id| {
-                *peer_id != my_peer_id && !data.peer_manager.has_directly_connected_conn(*peer_id)
+                *peer_id != my_peer_id && !data.has_directly_connected_conn(*peer_id)
             })
             .collect()
     }

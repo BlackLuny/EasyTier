@@ -85,6 +85,9 @@ disable_kcp_input_help: Disable inbound KCP traffic, while nodes with KCP proxy 
 disable_p2p: Disable P2P
 disable_p2p_help: Disable P2P mode; route all traffic through a manually specified relay server.
 
+try_connect_as_client: Try Connect as Client
+try_connect_as_client_help: Try to connect as client
+
 bind_device: Bind to Physical Device Only
 bind_device_help: Use only the physical network interface to prevent EasyTier from connecting via virtual networks.
 

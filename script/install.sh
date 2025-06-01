@@ -271,6 +271,7 @@ foreign_network_whitelist = "*"
 disable_p2p = false
 relay_all_peer_rpc = false
 disable_udp_hole_punching = false
+try_connect_as_client = false
 
 EOF
 

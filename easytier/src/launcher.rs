@@ -194,9 +194,8 @@ impl EasyTierLauncher {
                     };
                     *data_c.my_node_info.write().unwrap() = node_info.clone();
                     *data_c.routes.write().unwrap() = peer_mgr_c.list_routes().await;
-                    *data_c.peers.write().unwrap() = PeerManagerRpcService::new(peer_mgr_c.clone())
-                        .list_peers()
-                        .await;
+                    *data_c.peers.write().unwrap() =
+                        PeerManagerRpcService::new(peer_mgr_c.clone()).list_peers();
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             });
@@ -674,6 +673,10 @@ impl NetworkConfig {
 
         if let Some(mtu) = self.mtu {
             flags.mtu = mtu as u32;
+        }
+
+        if let Some(try_connect_as_client) = self.try_connect_as_client {
+            flags.try_connect_as_client = try_connect_as_client;
         }
 
         cfg.set_flags(flags);

@@ -291,7 +291,7 @@ impl PeerMap {
         self.peer_map.is_empty()
     }
 
-    pub async fn list_peers(&self) -> Vec<PeerId> {
+    pub fn list_peers(&self) -> Vec<PeerId> {
         let mut ret = Vec::new();
         for item in self.peer_map.iter() {
             let peer_id = item.key();
@@ -300,29 +300,29 @@ impl PeerMap {
         ret
     }
 
-    pub async fn list_peers_with_conn(&self) -> Vec<PeerId> {
+    pub fn list_peers_with_conn(&self) -> Vec<PeerId> {
         let mut ret = Vec::new();
-        let peers = self.list_peers().await;
+        let peers = self.list_peers();
         for peer_id in peers.iter() {
             let Some(peer) = self.get_peer_by_id(*peer_id) else {
                 continue;
             };
-            if peer.list_peer_conns().await.len() > 0 {
+            if peer.list_peer_conns().len() > 0 {
                 ret.push(*peer_id);
             }
         }
         ret
     }
 
-    pub async fn list_peer_conns(&self, peer_id: PeerId) -> Option<Vec<PeerConnInfo>> {
+    pub fn list_peer_conns(&self, peer_id: PeerId) -> Option<Vec<PeerConnInfo>> {
         if let Some(p) = self.get_peer_by_id(peer_id) {
-            Some(p.list_peer_conns().await)
+            Some(p.list_peer_conns())
         } else {
             return None;
         }
     }
 
-    pub async fn get_peer_default_conn_id(&self, peer_id: PeerId) -> Option<PeerConnId> {
+    pub fn get_peer_default_conn_id(&self, peer_id: PeerId) -> Option<PeerConnId> {
         self.get_peer_by_id(peer_id)
             .map(|p| p.get_default_conn_id())
     }
@@ -339,7 +339,7 @@ impl PeerMap {
         }
     }
 
-    pub async fn close_peer(&self, peer_id: PeerId) -> Result<(), TunnelError> {
+    pub fn close_peer(&self, peer_id: PeerId) -> Result<(), TunnelError> {
         let remove_ret = self.peer_map.remove(&peer_id);
         self.global_ctx
             .issue_event(GlobalCtxEvent::PeerRemoved(peer_id));
@@ -357,18 +357,18 @@ impl PeerMap {
         routes.insert(0, route);
     }
 
-    pub async fn clean_peer_without_conn(&self) {
+    pub fn clean_peer_without_conn(&self) {
         let mut to_remove = vec![];
 
-        for peer_id in self.list_peers().await {
-            let conns = self.list_peer_conns(peer_id).await;
+        for peer_id in self.list_peers() {
+            let conns = self.list_peer_conns(peer_id);
             if conns.is_none() || conns.as_ref().unwrap().is_empty() {
                 to_remove.push(peer_id);
             }
         }
 
         for peer_id in to_remove {
-            self.close_peer(peer_id).await.unwrap();
+            self.close_peer(peer_id).unwrap();
         }
     }
 
@@ -400,6 +400,22 @@ impl PeerMap {
             .iter()
             .map(|v| (v.key().clone(), v.value().clone()))
             .collect()
+    }
+
+    pub fn has_directly_connected_conn_as(
+        &self,
+        peer_id: PeerId,
+        as_client: bool,
+    ) -> Option<bool> {
+        let Some(peer) = self.get_peer_by_id(peer_id) else {
+            return None;
+        };
+        for conn in peer.list_peer_conns() {
+            if conn.is_client == as_client {
+                return Some(true);
+            }
+        }
+        Some(false)
     }
 }
 

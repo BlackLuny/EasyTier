@@ -64,6 +64,7 @@ export interface NetworkConfig {
   mapped_listeners: string[]
 
   enable_magic_dns?: boolean
+  try_connect_as_client?: boolean
 }
 
 export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {

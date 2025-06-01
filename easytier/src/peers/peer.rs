@@ -177,7 +177,7 @@ impl Peer {
         Ok(())
     }
 
-    pub async fn list_peer_conns(&self) -> Vec<PeerConnInfo> {
+    pub fn list_peer_conns(&self) -> Vec<PeerConnInfo> {
         let mut conns = vec![];
         for conn in self.conns.iter() {
             // do not lock here, otherwise it will cause dashmap deadlock
@@ -254,15 +254,15 @@ mod tests {
         local_peer.add_peer_conn(local_peer_conn).await;
         remote_peer.add_peer_conn(remote_peer_conn).await;
 
-        assert_eq!(local_peer.list_peer_conns().await.len(), 1);
-        assert_eq!(remote_peer.list_peer_conns().await.len(), 1);
+        assert_eq!(local_peer.list_peer_conns().len(), 1);
+        assert_eq!(remote_peer.list_peer_conns().len(), 1);
 
         let close_handler =
             tokio::spawn(async move { local_peer.close_peer_conn(&local_conn_id).await });
 
         // wait for remote peer conn close
         timeout(std::time::Duration::from_secs(5), async {
-            while (&remote_peer).list_peer_conns().await.len() != 0 {
+            while (&remote_peer).list_peer_conns().len() != 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         })

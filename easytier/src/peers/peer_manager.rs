@@ -349,6 +349,12 @@ impl PeerManager {
             .map_or(false, |x| !x.is_empty())
     }
 
+    pub fn has_directly_connected_conn_as_client(&self, peer_id: PeerId) -> bool {
+        self.peers
+            .has_directly_connected_conn_as(peer_id, true)
+            .unwrap_or(false)
+    }
+
     async fn start_peer_conn_close_event_handler(&self) {
         let dmap = self.directly_connected_conn_map.clone();
         let mut event_recv = self.global_ctx.subscribe();
@@ -685,8 +691,8 @@ impl PeerManager {
                     return vec![];
                 };
 
-                let mut peers = foreign_client.list_public_peers().await;
-                peers.extend(peer_map.list_peers_with_conn().await);
+                let mut peers = foreign_client.list_public_peers();
+                peers.extend(peer_map.list_peers_with_conn());
                 peers
             }
 
@@ -700,7 +706,7 @@ impl PeerManager {
                     return ret;
                 };
 
-                let networks = foreign_mgr.list_foreign_networks().await;
+                let networks = foreign_mgr.list_foreign_networks();
                 for (network_name, info) in networks.foreign_networks.iter() {
                     if info.peers.is_empty() {
                         continue;
@@ -967,7 +973,7 @@ impl PeerManager {
         let dmap = self.directly_connected_conn_map.clone();
         self.tasks.lock().await.spawn(async move {
             loop {
-                peer_map.clean_peer_without_conn().await;
+                peer_map.clean_peer_without_conn();
                 dmap.retain(|p, v| peer_map.has_peer(*p) && !v.is_empty());
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
@@ -1121,7 +1127,7 @@ mod tests {
 
         // wait mgr_a have 2 peers
         wait_for_condition(
-            || async { peer_mgr_a.get_peer_map().list_peers_with_conn().await.len() == 2 },
+            || async { peer_mgr_a.get_peer_map().list_peers_with_conn().len() == 2 },
             std::time::Duration::from_secs(5),
         )
         .await;
@@ -1129,7 +1135,7 @@ mod tests {
         drop(peer_mgr_b);
 
         wait_for_condition(
-            || async { peer_mgr_a.get_peer_map().list_peers_with_conn().await.len() == 1 },
+            || async { peer_mgr_a.get_peer_map().list_peers_with_conn().len() == 1 },
             std::time::Duration::from_secs(5),
         )
         .await;

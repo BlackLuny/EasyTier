@@ -37,6 +37,7 @@ pub fn gen_default_flags() -> Flags {
         disable_kcp_input: false,
         disable_relay_kcp: true,
         accept_dns: false,
+        try_connect_as_client: false,
     }
 }
 

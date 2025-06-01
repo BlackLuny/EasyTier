@@ -439,6 +439,15 @@ struct Cli {
 
     #[arg(
         long,
+        env = "ET_TRY_CONNECT_AS_CLIENT",
+        help = t!("core_clap.try_connect_as_client").to_string(),
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    try_connect_as_client: Option<bool>,
+
+    #[arg(
+        long,
         env = "ET_PORT_FORWARD",
         value_delimiter = ',',
         help = t!("core_clap.port_forward").to_string(),
@@ -770,6 +779,7 @@ impl TryFrom<&Cli> for TomlConfigLoader {
         f.enable_kcp_proxy = cli.enable_kcp_proxy.unwrap_or(f.enable_kcp_proxy);
         f.disable_kcp_input = cli.disable_kcp_input.unwrap_or(f.disable_kcp_input);
         f.accept_dns = cli.accept_dns.unwrap_or(f.accept_dns);
+        f.try_connect_as_client = cli.try_connect_as_client.unwrap_or(f.try_connect_as_client);
         cfg.set_flags(f);
 
         if !cli.exit_nodes.is_empty() {

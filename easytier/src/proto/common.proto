@@ -33,6 +33,9 @@ message FlagsInConfig {
 
   // enable magic dns or not
   bool accept_dns = 22;
+
+  // try to connect as a client
+  bool try_connect_as_client = 23;
 }
 
 message RpcDescriptor {
