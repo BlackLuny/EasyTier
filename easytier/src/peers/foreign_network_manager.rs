@@ -12,7 +12,6 @@ use std::{
 
 use dashmap::DashMap;
 use tokio::{
-    select,
     sync::{
         mpsc::{self, UnboundedReceiver, UnboundedSender},
         Mutex,
@@ -255,9 +254,7 @@ impl ForeignNetworkEntry {
         self.peer_map.add_route(Arc::new(Box::new(route))).await;
     }
 
-    async fn start_packet_recv(&self) {
-        let mut recv = self.packet_recv.lock().await.take().unwrap();
-        let mut ctl_recv = self.ctl_packet_recv.lock().await.take().unwrap();
+    async fn start_packet_recv_with_channel(&self, mut recv: PacketRecvChanReceiver) {
         let my_node_id = self.my_peer_id;
         let rpc_sender = self.rpc_sender.clone();
         let peer_map = self.peer_map.clone();
@@ -266,11 +263,7 @@ impl ForeignNetworkEntry {
         let network_name = self.network.network_name.clone();
 
         self.tasks.lock().await.spawn(async move {
-            while let Ok(zc_packet) = select! {
-                biased;
-                ret = recv_packet_from_chan(&mut recv) => ret,
-                ret = recv_packet_from_chan(&mut ctl_recv) => ret,
-            } {
+            while let Ok(zc_packet) = recv_packet_from_chan(&mut recv).await {
                 let Some(hdr) = zc_packet.peer_manager_header() else {
                     tracing::warn!("invalid packet, skip");
                     continue;
@@ -327,7 +320,10 @@ impl ForeignNetworkEntry {
 
     async fn prepare(&self, my_peer_id: PeerId, accessor: Box<dyn GlobalForeignNetworkAccessor>) {
         self.prepare_route(my_peer_id, accessor).await;
-        self.start_packet_recv().await;
+        let recv = self.packet_recv.lock().await.take().unwrap();
+        self.start_packet_recv_with_channel(recv).await;
+        let ctl_recv = self.ctl_packet_recv.lock().await.take().unwrap();
+        self.start_packet_recv_with_channel(ctl_recv).await;
         self.peer_rpc.run();
     }
 }
