@@ -164,15 +164,21 @@ impl PeerMap {
             return Some(dst_peer_id);
         }
 
-        let cache_info = self
+        if let Some(Some(dst_peer_id)) = self
             .cache_info
             .route_cache
-            .get(&(dst_peer_id, policy.clone()));
-        if let Some(cache_info) = cache_info {
-            if !cache_info.is_expired(Duration::from_secs(10)) {
-                return Some(cache_info.get().clone());
-            }
+            .get(&(dst_peer_id, policy.clone()))
+            .map(|x| {
+                if !x.is_expired(Duration::from_secs(10)) {
+                    Some(x.get().clone())
+                } else {
+                    None
+                }
+            })
+        {
+            return Some(dst_peer_id);
         }
+
         // get route info
         for route in self.routes.read().await.iter() {
             if let Some(gateway_peer_id) = route

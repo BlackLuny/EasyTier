@@ -129,6 +129,7 @@ pub struct PeerManager {
     peer_rpc_tspt: Arc<RpcTransport>,
 
     peer_packet_process_pipeline: Arc<RwLock<Vec<BoxPeerPacketFilter>>>,
+    peer_packet_process_pipeline_ctrl: Arc<RwLock<Vec<BoxPeerPacketFilter>>>,
     nic_packet_process_pipeline: Arc<RwLock<Vec<BoxNicPacketFilter>>>,
 
     route_algo_inst: RouteAlgoInst,
@@ -261,6 +262,7 @@ impl PeerManager {
 
             peer_packet_process_pipeline: Arc::new(RwLock::new(Vec::new())),
             nic_packet_process_pipeline: Arc::new(RwLock::new(Vec::new())),
+            peer_packet_process_pipeline_ctrl: Arc::new(RwLock::new(Vec::new())),
 
             route_algo_inst,
 
@@ -500,10 +502,13 @@ impl PeerManager {
         }
     }
 
-    async fn start_peer_recv_for_channel(&self, mut recv: PacketRecvChanReceiver) {
+    async fn start_peer_recv_for_channel(
+        &self,
+        mut recv: PacketRecvChanReceiver,
+        pipe_line: Arc<RwLock<Vec<BoxPeerPacketFilter>>>,
+    ) {
         let my_peer_id = self.my_peer_id;
         let peers = self.peers.clone();
-        let pipe_line = self.peer_packet_process_pipeline.clone();
         let foreign_client = self.foreign_network_client.clone();
         let foreign_mgr = self.foreign_network_manager.clone();
         let encryptor = self.encryptor.clone();
@@ -597,6 +602,14 @@ impl PeerManager {
             .push(pipeline);
     }
 
+    pub async fn add_packet_process_pipeline_ctrl(&self, pipeline: BoxPeerPacketFilter) {
+        // newest pipeline will be executed first
+        self.peer_packet_process_pipeline_ctrl
+            .write()
+            .await
+            .push(pipeline);
+    }
+
     pub async fn add_nic_packet_process_pipeline(&self, pipeline: BoxNicPacketFilter) {
         // newest pipeline will be executed first
         self.nic_packet_process_pipeline
@@ -654,7 +667,7 @@ impl PeerManager {
                 }
             }
         }
-        self.add_packet_process_pipeline(Box::new(PeerRpcPacketProcessor {
+        self.add_packet_process_pipeline_ctrl(Box::new(PeerRpcPacketProcessor {
             peer_rpc_tspt_sender: self.peer_rpc_tspt.peer_rpc_tspt_sender.clone(),
         }))
         .await;
@@ -665,7 +678,7 @@ impl PeerManager {
         T: Route + PeerPacketFilter + Send + Sync + Clone + 'static,
     {
         // for route
-        self.add_packet_process_pipeline(Box::new(route.clone()))
+        self.add_packet_process_pipeline_ctrl(Box::new(route.clone()))
             .await;
 
         struct Interface {
@@ -992,8 +1005,10 @@ impl PeerManager {
 
         let recv = self.packet_recv.lock().await.take().unwrap();
         let ctl_recv = self.ctl_packet_recv.lock().await.take().unwrap();
-        self.start_peer_recv_for_channel(recv).await;
-        self.start_peer_recv_for_channel(ctl_recv).await;
+        self.start_peer_recv_for_channel(recv, self.peer_packet_process_pipeline.clone())
+            .await;
+        self.start_peer_recv_for_channel(ctl_recv, self.peer_packet_process_pipeline_ctrl.clone())
+            .await;
         self.run_clean_peer_without_conn_routine().await;
 
         self.run_foriegn_network().await;
