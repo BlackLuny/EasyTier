@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 
 use tokio::{
-    select,
     sync::{
         mpsc::{self, UnboundedReceiver, UnboundedSender},
         Mutex, RwLock,
