@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
 
 use tokio::{select, sync::mpsc, task::JoinHandle};
@@ -8,9 +7,7 @@ use tokio::{select, sync::mpsc, task::JoinHandle};
 use tracing::Instrument;
 
 use super::peer_conn::{PeerConn, PeerConnId};
-use crate::{
-    common::scoped_task::ScopedTask, peers::PacketRecvChainPair, proto::cli::PeerConnInfo,
-};
+use crate::common::timed_cache::Timed;
 use crate::{
     common::{
         error::Error,
@@ -19,6 +16,7 @@ use crate::{
     },
     tunnel::packet_def::ZCPacket,
 };
+use crate::{peers::PacketRecvChainPair, proto::cli::PeerConnInfo};
 
 type ArcPeerConn = Arc<PeerConn>;
 type ConnMap = Arc<DashMap<PeerConnId, ArcPeerConn>>;
@@ -35,8 +33,7 @@ pub struct Peer {
 
     shutdown_notifier: Arc<tokio::sync::Notify>,
 
-    default_conn_id: Arc<AtomicCell<PeerConnId>>,
-    default_conn_id_clear_task: ScopedTask<()>,
+    default_conn: std::sync::RwLock<Option<Timed<ArcPeerConn>>>,
 }
 
 impl Peer {
@@ -88,19 +85,6 @@ impl Peer {
             )),
         );
 
-        let default_conn_id = Arc::new(AtomicCell::new(PeerConnId::default()));
-
-        let conns_copy = conns.clone();
-        let default_conn_id_copy = default_conn_id.clone();
-        let default_conn_id_clear_task = ScopedTask::from(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                if conns_copy.len() > 1 {
-                    default_conn_id_copy.store(PeerConnId::default());
-                }
-            }
-        }));
-
         Peer {
             peer_node_id,
             conns: conns.clone(),
@@ -111,8 +95,7 @@ impl Peer {
             close_event_listener,
 
             shutdown_notifier,
-            default_conn_id,
-            default_conn_id_clear_task,
+            default_conn: std::sync::RwLock::new(None),
         }
     }
 
@@ -138,33 +121,40 @@ impl Peer {
         self.conns.insert(conn.get_conn_id(), Arc::new(conn));
     }
 
-    async fn select_conn(&self) -> Option<ArcPeerConn> {
-        let default_conn_id = self.default_conn_id.load();
-        if let Some(conn) = self.conns.get(&default_conn_id) {
-            return Some(conn.clone());
+    fn select_conn(&self) -> Option<ArcPeerConn> {
+        {
+            let guard = self.default_conn.read().unwrap();
+            if let Some(conn) = &*guard {
+                if conn.is_expired(std::time::Duration::from_secs(5)) {
+                    *self.default_conn.write().unwrap() = None;
+                } else {
+                    return Some(conn.get().clone());
+                }
+            }
         }
 
         // find a conn with the smallest latency
         let mut min_latency = std::u64::MAX;
+        let mut min_conn = None;
         for conn in self.conns.iter() {
-            let latency = conn.value().get_stats().latency_us;
+            let latency = conn.value().get_latency_us();
             if latency < min_latency {
                 min_latency = latency;
-                self.default_conn_id.store(conn.get_conn_id());
+                min_conn = Some(conn.clone());
             }
         }
-
-        self.conns
-            .get(&self.default_conn_id.load())
-            .map(|conn| conn.clone())
+        if let Some(conn) = min_conn {
+            *self.default_conn.write().unwrap() = Some(Timed::new(conn.clone()));
+            return Some(conn);
+        }
+        None
     }
 
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
-        let Some(conn) = self.select_conn().await else {
+        let Some(conn) = self.select_conn() else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
         conn.send_msg(msg).await?;
-
         Ok(())
     }
 
@@ -178,21 +168,17 @@ impl Peer {
     }
 
     pub fn list_peer_conns(&self) -> Vec<PeerConnInfo> {
-        let mut conns = vec![];
+        let mut ret = vec![];
         for conn in self.conns.iter() {
             // do not lock here, otherwise it will cause dashmap deadlock
-            conns.push(conn.clone());
-        }
-
-        let mut ret = Vec::new();
-        for conn in conns {
             ret.push(conn.get_conn_info());
         }
         ret
     }
 
-    pub fn get_default_conn_id(&self) -> PeerConnId {
-        self.default_conn_id.load()
+    pub fn get_default_conn(&self) -> Option<ArcPeerConn> {
+        let guard = self.default_conn.read().unwrap();
+        guard.as_ref().map(|conn| conn.get().clone())
     }
 }
 

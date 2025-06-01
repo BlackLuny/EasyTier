@@ -438,6 +438,10 @@ impl PeerConn {
         }
     }
 
+    pub fn get_latency_us(&self) -> u64 {
+        self.latency_stats.get_latency_us()
+    }
+
     pub fn get_conn_info(&self) -> PeerConnInfo {
         let info = self.info.as_ref().unwrap();
         PeerConnInfo {

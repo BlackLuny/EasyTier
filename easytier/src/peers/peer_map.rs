@@ -1,8 +1,4 @@
-use std::{
-    net::Ipv4Addr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{net::Ipv4Addr, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use dashmap::DashMap;
@@ -12,6 +8,7 @@ use crate::{
     common::{
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity},
+        timed_cache::Timed,
         PeerId,
     },
     peers::PacketRecvChainPair,
@@ -25,21 +22,7 @@ use super::{
     route_trait::{ArcRoute, NextHopPolicy},
     PacketRecvChan,
 };
-struct Timed<T> {
-    update_time: Instant,
-    value: T,
-}
-impl<T> Timed<T> {
-    fn new(value: T) -> Self {
-        Self {
-            update_time: Instant::now(),
-            value,
-        }
-    }
-    fn is_expired(&self, duration: Duration) -> bool {
-        self.update_time.elapsed() > duration
-    }
-}
+
 struct CacheInfo {
     route_cache: DashMap<(PeerId, NextHopPolicy), Timed<PeerId>>,
 }
@@ -165,13 +148,7 @@ impl PeerMap {
         let Some(peer) = self.get_peer_by_id(peer_id) else {
             return None;
         };
-        let default_conn_id = peer.get_default_conn_id();
-        if let Some(conn_info) = self.alive_conns.get(&(peer_id, default_conn_id)) {
-            if let Some(stats) = conn_info.stats {
-                return Some(stats.latency_us);
-            }
-        }
-        None
+        peer.get_default_conn().map(|conn| conn.get_latency_us())
     }
 
     pub async fn get_gateway_peer_id(
@@ -193,7 +170,7 @@ impl PeerMap {
             .get(&(dst_peer_id, policy.clone()));
         if let Some(cache_info) = cache_info {
             if !cache_info.is_expired(Duration::from_secs(10)) {
-                return Some(cache_info.value);
+                return Some(cache_info.get().clone());
             }
         }
         // get route info
@@ -324,7 +301,8 @@ impl PeerMap {
 
     pub fn get_peer_default_conn_id(&self, peer_id: PeerId) -> Option<PeerConnId> {
         self.get_peer_by_id(peer_id)
-            .map(|p| p.get_default_conn_id())
+            .and_then(|p| p.get_default_conn())
+            .map(|conn| conn.get_conn_id())
     }
 
     pub async fn close_peer_conn(
@@ -402,11 +380,7 @@ impl PeerMap {
             .collect()
     }
 
-    pub fn has_directly_connected_conn_as(
-        &self,
-        peer_id: PeerId,
-        as_client: bool,
-    ) -> Option<bool> {
+    pub fn has_directly_connected_conn_as(&self, peer_id: PeerId, as_client: bool) -> Option<bool> {
         let Some(peer) = self.get_peer_by_id(peer_id) else {
             return None;
         };
