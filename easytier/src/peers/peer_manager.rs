@@ -32,7 +32,7 @@ use crate::{
         peer_rpc::PeerRpcManagerTransport,
         recv_packet_from_chan,
         route_trait::{ForeignNetworkRouteInfoMap, NextHopPolicy, RouteInterface},
-        PeerPacketFilter,
+        PacketRecvChainPair, PeerPacketFilter,
     },
     proto::{
         cli::{
@@ -168,7 +168,7 @@ impl PeerManager {
         let (ctl_packet_send, ctl_packet_recv) = create_packet_recv_chan();
         let peers = Arc::new(PeerMap::new(
             packet_send.clone(),
-            Some(ctl_packet_send),
+            Some(ctl_packet_send.clone()),
             global_ctx.clone(),
             my_peer_id,
         ));
@@ -226,12 +226,13 @@ impl PeerManager {
         let foreign_network_manager = Arc::new(ForeignNetworkManager::new(
             my_peer_id,
             global_ctx.clone(),
-            packet_send.clone(),
+            PacketRecvChainPair::new(packet_send.clone(), Some(ctl_packet_send.clone())),
             Self::build_foreign_network_manager_accessor(&peers),
         ));
         let foreign_network_client = Arc::new(ForeignNetworkClient::new(
             global_ctx.clone(),
             packet_send.clone(),
+            ctl_packet_send.clone(),
             peer_rpc_mgr.clone(),
             my_peer_id,
         ));

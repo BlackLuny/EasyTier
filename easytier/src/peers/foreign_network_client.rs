@@ -20,12 +20,13 @@ impl ForeignNetworkClient {
     pub fn new(
         global_ctx: ArcGlobalCtx,
         packet_sender_to_mgr: PacketRecvChan,
+        ctl_packet_sender_to_mgr: PacketRecvChan,
         peer_rpc: Arc<PeerRpcManager>,
         my_peer_id: PeerId,
     ) -> Self {
         let peer_map = Arc::new(PeerMap::new(
             packet_sender_to_mgr,
-            None,
+            Some(ctl_packet_sender_to_mgr),
             global_ctx.clone(),
             my_peer_id,
         ));

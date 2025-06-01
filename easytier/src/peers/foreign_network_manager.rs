@@ -28,7 +28,10 @@ use crate::{
         stun::MockStunInfoCollector,
         PeerId,
     },
-    peers::route_trait::{Route, RouteInterface},
+    peers::{
+        route_trait::{Route, RouteInterface},
+        PacketRecvChainPair,
+    },
     proto::{
         cli::{ForeignNetworkEntryPb, ListForeignNetworkResponse, PeerInfo},
         common::NatType,
@@ -46,7 +49,7 @@ use super::{
     peer_rpc_service::DirectConnectorManagerRpcServer,
     recv_packet_from_chan,
     route_trait::NextHopPolicy,
-    PacketRecvChan, PacketRecvChanReceiver,
+    PacketRecvChanReceiver,
 };
 
 #[async_trait::async_trait]
@@ -62,7 +65,7 @@ struct ForeignNetworkEntry {
     network: NetworkIdentity,
     peer_map: Arc<PeerMap>,
     relay_data: bool,
-    pm_packet_sender: Mutex<Option<PacketRecvChan>>,
+    pm_packet_sender: Mutex<Option<PacketRecvChainPair>>,
 
     peer_rpc: Arc<PeerRpcManager>,
     rpc_sender: UnboundedSender<ZCPacket>,
@@ -78,7 +81,7 @@ impl ForeignNetworkEntry {
         global_ctx: ArcGlobalCtx,
         my_peer_id: PeerId,
         relay_data: bool,
-        pm_packet_sender: PacketRecvChan,
+        pm_packet_sender: PacketRecvChainPair,
     ) -> Self {
         let foreign_global_ctx = Self::build_foreign_global_ctx(&network, global_ctx.clone());
 
@@ -299,6 +302,7 @@ impl ForeignNetworkEntry {
                             );
                         }
                     } else {
+                        let is_data = hdr.packet_type == PacketType::Data as u8;
                         let mut foreign_packet = ZCPacket::new_for_foreign_network(
                             &network_name,
                             to_peer_id,
@@ -309,8 +313,27 @@ impl ForeignNetworkEntry {
                             gateway_peer_id.unwrap_or(to_peer_id),
                             PacketType::ForeignNetworkPacket as u8,
                         );
-                        if let Err(e) = pm_sender.send(foreign_packet).await {
-                            tracing::error!("send packet to peer with pm failed: {:?}", e);
+                        if is_data {
+                            if let Err(e) = pm_sender
+                                .get_data_packet_recv_chan()
+                                .try_send(foreign_packet)
+                            {
+                                tracing::error!(
+                                    "send foreign data packet to peer with pm failed: {:?}",
+                                    e
+                                );
+                            }
+                        } else {
+                            if let Err(e) = pm_sender
+                                .get_ctl_packet_recv_chan()
+                                .send(foreign_packet)
+                                .await
+                            {
+                                tracing::error!(
+                                    "send foreign ctrl packet to peer with pm failed: {:?}",
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -392,7 +415,7 @@ impl ForeignNetworkManagerData {
         dst_peer_id: PeerId,
         relay_data: bool,
         global_ctx: &ArcGlobalCtx,
-        pm_packet_sender: &PacketRecvChan,
+        pm_packet_sender: &PacketRecvChainPair,
     ) -> (Arc<ForeignNetworkEntry>, bool) {
         let mut new_added = false;
 
@@ -435,7 +458,7 @@ pub const FOREIGN_NETWORK_SERVICE_ID: u32 = 1;
 pub struct ForeignNetworkManager {
     my_peer_id: PeerId,
     global_ctx: ArcGlobalCtx,
-    packet_sender_to_mgr: PacketRecvChan,
+    packet_sender_to_mgr: PacketRecvChainPair,
 
     data: Arc<ForeignNetworkManagerData>,
 
@@ -446,7 +469,7 @@ impl ForeignNetworkManager {
     pub fn new(
         my_peer_id: PeerId,
         global_ctx: ArcGlobalCtx,
-        packet_sender_to_mgr: PacketRecvChan,
+        packet_sender_to_mgr: PacketRecvChainPair,
         accessor: Box<dyn GlobalForeignNetworkAccessor>,
     ) -> Self {
         let data = Arc::new(ForeignNetworkManagerData {
