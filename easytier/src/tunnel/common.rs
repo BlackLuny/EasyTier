@@ -417,7 +417,7 @@ where
         }
     }
 
-    Err(last_err.unwrap_or(TunnelError::Shutdown))
+    Err(last_err.unwrap_or(TunnelError::TunError("conn failed".to_string())))
 }
 
 pub(crate) fn setup_sokcet2(

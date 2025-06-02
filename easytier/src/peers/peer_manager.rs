@@ -90,7 +90,7 @@ impl PeerRpcManagerTransport for RpcTransport {
                 .with_context(|| "encrypt failed")?;
         }
         // send to self and this packet will be forwarded in peer_recv loop
-        peers.send_msg_directly(msg, self.my_peer_id).await
+        peers.send_msg_directly(msg, self.my_peer_id, false).await
     }
 
     async fn recv(&self) -> Result<ZCPacket, Error> {
@@ -433,7 +433,8 @@ impl PeerManager {
         let mut peer = PeerConn::new(self.my_peer_id, self.global_ctx.clone(), tunnel);
         peer.do_handshake_as_server().await?;
         if self.global_ctx.config.get_flags().private_mode
-            && peer.get_network_identity().network_name != self.global_ctx.get_network_identity().network_name
+            && peer.get_network_identity().network_name
+                != self.global_ctx.get_network_identity().network_name
         {
             return Err(Error::SecretKeyError(
                 "private mode is turned on, network identity not match".to_string(),
@@ -471,7 +472,6 @@ impl PeerManager {
         let foreign_hdr = packet.foreign_network_hdr().unwrap();
         let foreign_network_name = foreign_hdr.get_network_name(packet.payload());
         let foreign_peer_id = foreign_hdr.get_dst_peer_id();
-
         if to_peer_id == my_peer_id {
             // packet sent from other peer to me, extract the inner packet and forward it
             if let Err(e) = foreign_network_mgr
@@ -479,6 +479,7 @@ impl PeerManager {
                     &foreign_network_name,
                     foreign_peer_id,
                     packet.foreign_network_packet(),
+                    false,
                 )
                 .await
             {
@@ -493,7 +494,7 @@ impl PeerManager {
         } else if from_peer_id == my_peer_id {
             // packet is generated from foreign network mgr and should be forward to other peer
             if let Err(e) = peer_map
-                .send_msg(packet, to_peer_id, NextHopPolicy::LeastHop)
+                .send_msg(packet, to_peer_id, NextHopPolicy::LeastHop, true)
                 .await
             {
                 tracing::debug!(
@@ -539,6 +540,7 @@ impl PeerManager {
                 tracing::trace!(?hdr, "peer recv a packet...");
                 let from_peer_id = hdr.from_peer_id.get();
                 let to_peer_id = hdr.to_peer_id.get();
+                let allow_drop_packet = hdr.packet_type == PacketType::Data as u8;
                 if to_peer_id != my_peer_id {
                     if hdr.forward_counter > 7 {
                         tracing::warn!(?hdr, "forward counter exceed, drop packet");
@@ -562,8 +564,14 @@ impl PeerManager {
                     }
 
                     tracing::trace!(?to_peer_id, ?my_peer_id, "need forward");
-                    let ret =
-                        Self::send_msg_internal(&peers, &foreign_client, ret, to_peer_id).await;
+                    let ret = Self::send_msg_internal(
+                        &peers,
+                        &foreign_client,
+                        ret,
+                        to_peer_id,
+                        allow_drop_packet,
+                    )
+                    .await;
                     if ret.is_err() {
                         tracing::error!(?ret, ?to_peer_id, ?from_peer_id, "forward packet error");
                     }
@@ -828,8 +836,20 @@ impl PeerManager {
         }
     }
 
-    pub async fn send_msg(&self, msg: ZCPacket, dst_peer_id: PeerId) -> Result<(), Error> {
-        Self::send_msg_internal(&self.peers, &self.foreign_network_client, msg, dst_peer_id).await
+    pub async fn send_msg(
+        &self,
+        msg: ZCPacket,
+        dst_peer_id: PeerId,
+        allow_drop_packet: bool,
+    ) -> Result<(), Error> {
+        Self::send_msg_internal(
+            &self.peers,
+            &self.foreign_network_client,
+            msg,
+            dst_peer_id,
+            allow_drop_packet,
+        )
+        .await
     }
 
     async fn send_msg_internal(
@@ -837,14 +857,19 @@ impl PeerManager {
         foreign_network_client: &Arc<ForeignNetworkClient>,
         msg: ZCPacket,
         dst_peer_id: PeerId,
+        allow_drop_packet: bool,
     ) -> Result<(), Error> {
         let policy =
             Self::get_next_hop_policy(msg.peer_manager_header().unwrap().is_latency_first());
         if let Some(gateway) = peers.get_gateway_peer_id(dst_peer_id, policy.clone()).await {
             if peers.has_peer(gateway) {
-                peers.send_msg_directly(msg, gateway).await
+                peers
+                    .send_msg_directly(msg, gateway, allow_drop_packet)
+                    .await
             } else if foreign_network_client.has_next_hop(gateway) {
-                foreign_network_client.send_msg(msg, gateway).await
+                foreign_network_client
+                    .send_msg(msg, gateway, allow_drop_packet)
+                    .await
             } else {
                 tracing::warn!(
                     ?gateway,
@@ -855,7 +880,9 @@ impl PeerManager {
             }
         } else if foreign_network_client.has_next_hop(dst_peer_id) {
             // check foreign network again. so in happy path we can avoid extra check
-            foreign_network_client.send_msg(msg, dst_peer_id).await
+            foreign_network_client
+                .send_msg(msg, dst_peer_id, allow_drop_packet)
+                .await
         } else {
             tracing::debug!(?dst_peer_id, "no gateway for peer");
             Err(Error::RouteError(None))
@@ -931,6 +958,7 @@ impl PeerManager {
                 &self.foreign_network_client,
                 msg,
                 cur_to_peer_id,
+                true,
             )
             .await;
         }
@@ -966,9 +994,14 @@ impl PeerManager {
                 .to_peer_id
                 .set(*peer_id);
 
-            if let Err(e) =
-                Self::send_msg_internal(&self.peers, &self.foreign_network_client, msg, *peer_id)
-                    .await
+            if let Err(e) = Self::send_msg_internal(
+                &self.peers,
+                &self.foreign_network_client,
+                msg,
+                *peer_id,
+                true,
+            )
+            .await
             {
                 errs.push(e);
             }

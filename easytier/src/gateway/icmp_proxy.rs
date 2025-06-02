@@ -254,7 +254,7 @@ impl IcmpProxy {
                 while let Some(msg) = receiver.recv().await {
                     let hdr = msg.peer_manager_header().unwrap();
                     let to_peer_id = hdr.to_peer_id.into();
-                    let ret = peer_manager.send_msg(msg, to_peer_id).await;
+                    let ret = peer_manager.send_msg(msg, to_peer_id, true).await;
                     if ret.is_err() {
                         tracing::error!("send icmp packet to peer failed: {:?}", ret);
                     }

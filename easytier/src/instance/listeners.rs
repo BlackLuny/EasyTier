@@ -350,7 +350,7 @@ mod tests {
 
             async fn accept(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                Err(TunnelError::BufferFull)
+                Err(TunnelError::TunError("test".to_string()))
             }
         }
 

@@ -428,7 +428,7 @@ impl UdpProxy {
             while let Ok(msg) = receiver.recv().await {
                 let to_peer_id: PeerId = msg.peer_manager_header().unwrap().to_peer_id.get();
                 tracing::trace!(?msg, ?to_peer_id, "udp nat packet response send");
-                let ret = peer_manager.send_msg(msg, to_peer_id).await;
+                let ret = peer_manager.send_msg(msg, to_peer_id, true).await;
                 if ret.is_err() {
                     tracing::error!("send icmp packet to peer failed: {:?}", ret);
                 }

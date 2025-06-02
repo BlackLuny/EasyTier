@@ -60,9 +60,17 @@ impl ForeignNetworkClient {
         None
     }
 
-    pub async fn send_msg(&self, msg: ZCPacket, peer_id: PeerId) -> Result<(), Error> {
+    pub async fn send_msg(
+        &self,
+        msg: ZCPacket,
+        peer_id: PeerId,
+        allow_drop_packet: bool,
+    ) -> Result<(), Error> {
         if let Some(next_hop) = self.get_next_hop(peer_id) {
-            let ret = self.peer_map.send_msg_directly(msg, next_hop).await;
+            let ret = self
+                .peer_map
+                .send_msg_directly(msg, next_hop, allow_drop_packet)
+                .await;
             if ret.is_err() {
                 tracing::error!(
                     ?ret,

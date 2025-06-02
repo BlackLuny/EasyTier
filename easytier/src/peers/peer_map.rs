@@ -111,7 +111,12 @@ impl PeerMap {
         peer_id == self.my_peer_id || self.peer_map.contains_key(&peer_id)
     }
 
-    pub async fn send_msg_directly(&self, msg: ZCPacket, dst_peer_id: PeerId) -> Result<(), Error> {
+    pub async fn send_msg_directly(
+        &self,
+        msg: ZCPacket,
+        dst_peer_id: PeerId,
+        allow_drop_packet: bool,
+    ) -> Result<(), Error> {
         if dst_peer_id == self.my_peer_id {
             let packet_send = self.packet_send.clone();
             // TODO: use data or ctl packet send chan?
@@ -130,7 +135,13 @@ impl PeerMap {
 
         match self.get_peer_by_id(dst_peer_id) {
             Some(peer) => {
-                peer.send_msg(msg).await?;
+                if allow_drop_packet {
+                    if let Err(e) = peer.try_send_msg(msg) {
+                        tracing::error!("send msg to peer failed: {:?} drop it", e);
+                    }
+                } else {
+                    peer.send_msg(msg).await?;
+                }
             }
             None => {
                 tracing::error!("no peer for dst_peer_id: {}", dst_peer_id);
@@ -238,6 +249,7 @@ impl PeerMap {
         msg: ZCPacket,
         dst_peer_id: PeerId,
         policy: NextHopPolicy,
+        allow_drop_packet: bool,
     ) -> Result<(), Error> {
         let Some(gateway_peer_id) = self.get_gateway_peer_id(dst_peer_id, policy).await else {
             return Err(Error::RouteError(Some(format!(
@@ -246,7 +258,8 @@ impl PeerMap {
             ))));
         };
 
-        self.send_msg_directly(msg, gateway_peer_id).await?;
+        self.send_msg_directly(msg, gateway_peer_id, allow_drop_packet)
+            .await?;
         return Ok(());
     }
 

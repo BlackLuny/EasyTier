@@ -25,8 +25,8 @@ impl MpscTunnelSender {
 
     pub fn try_send(&self, item: ZCPacket) -> Result<(), TunnelError> {
         self.0.try_send(item).map_err(|e| match e {
-            TrySendError::Full(_) => TunnelError::BufferFull,
-            TrySendError::Closed(_) => TunnelError::Shutdown,
+            TrySendError::Full(e) => TunnelError::BufferFull(e),
+            TrySendError::Closed(e) => TunnelError::ChannelClosed(e),
         })
     }
 }
@@ -42,7 +42,7 @@ pub struct MpscTunnel<T> {
 
 impl<T: Tunnel> MpscTunnel<T> {
     pub fn new(tunnel: T, send_timeout: Option<Duration>) -> Self {
-        let (tx, mut rx) = channel(32);
+        let (tx, mut rx) = channel(128);
         let (stream, mut sink) = tunnel.split();
 
         let task = tokio::spawn(async move {

@@ -174,7 +174,9 @@ impl ForeignNetworkEntry {
                     .ok_or(anyhow::anyhow!("peer map is gone"))?;
 
                 // send to ourselves so we can handle it in forward logic.
-                peer_map.send_msg_directly(msg, self.my_peer_id).await
+                peer_map
+                    .send_msg_directly(msg, self.my_peer_id, false)
+                    .await
             }
 
             async fn recv(&self) -> Result<ZCPacket, Error> {
@@ -273,6 +275,7 @@ impl ForeignNetworkEntry {
                 };
                 tracing::info!(?hdr, "recv packet in foreign network manager");
                 let to_peer_id = hdr.to_peer_id.get();
+                let is_data = hdr.packet_type == PacketType::Data as u8;
                 if to_peer_id == my_node_id {
                     if hdr.packet_type == PacketType::TaRpc as u8
                         || hdr.packet_type == PacketType::RpcReq as u8
@@ -293,7 +296,7 @@ impl ForeignNetworkEntry {
 
                     if gateway_peer_id.is_some() && peer_map.has_peer(gateway_peer_id.unwrap()) {
                         if let Err(e) = peer_map
-                            .send_msg_directly(zc_packet, gateway_peer_id.unwrap())
+                            .send_msg_directly(zc_packet, gateway_peer_id.unwrap(), is_data)
                             .await
                         {
                             tracing::error!(
@@ -302,7 +305,6 @@ impl ForeignNetworkEntry {
                             );
                         }
                     } else {
-                        let is_data = hdr.packet_type == PacketType::Data as u8;
                         let mut foreign_packet = ZCPacket::new_for_foreign_network(
                             &network_name,
                             to_peer_id,
@@ -620,11 +622,12 @@ impl ForeignNetworkManager {
         network_name: &str,
         dst_peer_id: PeerId,
         msg: ZCPacket,
+        allow_drop_packet: bool,
     ) -> Result<(), Error> {
         if let Some(entry) = self.data.get_network_entry(network_name) {
             entry
                 .peer_map
-                .send_msg(msg, dst_peer_id, NextHopPolicy::LeastHop)
+                .send_msg(msg, dst_peer_id, NextHopPolicy::LeastHop, allow_drop_packet)
                 .await
         } else {
             Err(Error::RouteError(Some("network not found".to_string())))

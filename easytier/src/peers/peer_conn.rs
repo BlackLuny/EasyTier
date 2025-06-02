@@ -404,6 +404,10 @@ impl PeerConn {
         Ok(self.sink.send(msg).await?)
     }
 
+    pub fn try_send_msg(&self, msg: ZCPacket) -> Result<(), TunnelError> {
+        self.sink.try_send(msg)
+    }
+
     pub fn get_peer_id(&self) -> PeerId {
         self.info.as_ref().unwrap().my_peer_id
     }

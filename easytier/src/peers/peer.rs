@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -8,6 +9,7 @@ use tracing::Instrument;
 
 use super::peer_conn::{PeerConn, PeerConnId};
 use crate::common::timed_cache::Timed;
+use crate::tunnel::TunnelError;
 use crate::{
     common::{
         error::Error,
@@ -149,11 +151,67 @@ impl Peer {
     }
 
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
+        if let Err(e) = self.try_send_msg_internal(msg) {
+            let msg = match e {
+                Error::TunnelError(TunnelError::BufferFull(e)) => e,
+                Error::TunnelError(TunnelError::ChannelClosed(e)) => e,
+                _ => return Err(e),
+            };
+            let Some(conn) = self.select_conn() else {
+                return Err(Error::PeerNoConnectionError(self.peer_node_id));
+            };
+            conn.send_msg(msg).await?;
+        }
+        Ok(())
+    }
+
+    pub fn try_send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
+        self.try_send_msg_internal(msg)
+    }
+
+    fn try_send_msg_internal(&self, msg: ZCPacket) -> Result<(), Error> {
         let Some(conn) = self.select_conn() else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
-        conn.send_msg(msg).await?;
-        Ok(())
+        let e = match conn.try_send_msg(msg) {
+            Ok(()) => {
+                return Ok(());
+            }
+            Err(e) => e,
+        };
+        if self.conns.len() == 1 {
+            return Err(Error::TunnelError(e));
+        }
+        let mut msg = match e {
+            TunnelError::BufferFull(e) => e,
+            TunnelError::ChannelClosed(e) => e,
+            _ => return Err(Error::TunnelError(e)),
+        };
+        // try other conn
+        // find a conn with the smallest latency
+        let mut all_conns = self
+            .conns
+            .iter()
+            .map(|conn| conn.clone())
+            .collect::<Vec<_>>();
+        all_conns.sort_by_key(|conn| conn.get_latency_us());
+
+        for conn in all_conns {
+            match conn.try_send_msg(msg) {
+                Ok(()) => {
+                    *self.default_conn.write().unwrap() = Some(Timed::new(conn));
+                    return Ok(());
+                }
+                Err(e) => {
+                    msg = match e {
+                        TunnelError::BufferFull(e) => e,
+                        TunnelError::ChannelClosed(e) => e,
+                        _ => return Err(Error::TunnelError(e)),
+                    };
+                }
+            }
+        }
+        Err(Error::TunnelError(TunnelError::BufferFull(msg)))
     }
 
     pub async fn close_peer_conn(&self, conn_id: &PeerConnId) -> Result<(), Error> {

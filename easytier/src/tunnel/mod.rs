@@ -59,7 +59,7 @@ pub enum TunnelError {
     #[error("conn id not match, expect: {0}, actual: {1}")]
     ConnIdNotMatch(u32, u32),
     #[error("buffer full")]
-    BufferFull,
+    BufferFull(ZCPacket),
 
     #[error("timeout")]
     Timeout(#[from] Elapsed),
@@ -67,8 +67,8 @@ pub enum TunnelError {
     #[error("anyhow error: {0}")]
     Anyhow(#[from] anyhow::Error),
 
-    #[error("shutdown")]
-    Shutdown,
+    #[error("channel closed")]
+    ChannelClosed(ZCPacket),
 
     #[error("no dns record found")]
     NoDnsRecordFound(IpVersion),
@@ -79,6 +79,9 @@ pub enum TunnelError {
 
     #[error("tunnel error: {0}")]
     TunError(String),
+
+    #[error("tunnel shutdown")]
+    Shutdown,
 }
 
 pub type StreamT = packet_def::ZCPacket;
