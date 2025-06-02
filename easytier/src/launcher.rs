@@ -683,7 +683,11 @@ impl NetworkConfig {
             flags.mtu = mtu as u32;
         }
 
-        if let Some(try_connect_as_client) = self.try_connect_as_client {
+        if let Some(enable_private_mode) = self.enable_private_mode {
+            flags.private_mode = enable_private_mode;
+        }
+	
+	if let Some(try_connect_as_client) = self.try_connect_as_client {
             flags.try_connect_as_client = try_connect_as_client;
         }
 

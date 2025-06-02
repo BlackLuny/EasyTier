@@ -64,6 +64,7 @@ export interface NetworkConfig {
   mapped_listeners: string[]
 
   enable_magic_dns?: boolean
+  enable_private_mode?: boolean
   try_connect_as_client?: boolean
 }
 
@@ -122,6 +123,8 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     mtu: null,
     mapped_listeners: [],
     enable_magic_dns: false,
+    enable_private_mode: false,
+    try_connect_as_client: false
   }
 }
 

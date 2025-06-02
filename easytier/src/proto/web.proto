@@ -65,7 +65,8 @@ message NetworkConfig {
     repeated string mapped_listeners = 41;
 
     optional bool enable_magic_dns = 42;
-    optional bool try_connect_as_client = 43;
+    optional bool enable_private_mode = 43;
+    optional bool try_connect_as_client = 44;
 }
 
 message MyNodeInfo {
