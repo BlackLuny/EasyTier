@@ -127,7 +127,9 @@ impl Peer {
             let guard = self.default_conn.read().unwrap();
             if let Some(conn) = &*guard {
                 if !conn.is_expired(std::time::Duration::from_secs(5)) {
-                    return conn.get().upgrade();
+                    if let Some(conn) = conn.get().upgrade() {
+                        return Some(conn);
+                    }
                 }
             }
         }
