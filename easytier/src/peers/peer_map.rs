@@ -115,7 +115,7 @@ impl PeerMap {
         &self,
         msg: ZCPacket,
         dst_peer_id: PeerId,
-        allow_drop_packet: bool,
+        _allow_drop_packet: bool,
     ) -> Result<(), Error> {
         if dst_peer_id == self.my_peer_id {
             let packet_send = self.packet_send.clone();
@@ -135,13 +135,13 @@ impl PeerMap {
 
         match self.get_peer_by_id(dst_peer_id) {
             Some(peer) => {
-                if allow_drop_packet {
-                    if let Err(e) = peer.try_send_msg(msg) {
-                        tracing::error!("send msg to peer failed: {:?} drop it", e);
-                    }
-                } else {
+                // if allow_drop_packet {
+                //     if let Err(e) = peer.try_send_msg(msg) {
+                //         tracing::error!("send msg to peer failed: {:?} drop it", e);
+                //     }
+                // } else {
                     peer.send_msg(msg).await?;
-                }
+                // }
             }
             None => {
                 tracing::error!("no peer for dst_peer_id: {}", dst_peer_id);
