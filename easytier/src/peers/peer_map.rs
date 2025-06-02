@@ -115,14 +115,17 @@ impl PeerMap {
         &self,
         msg: ZCPacket,
         dst_peer_id: PeerId,
-        _allow_drop_packet: bool,
+        allow_drop_packet: bool,
     ) -> Result<(), Error> {
         if dst_peer_id == self.my_peer_id {
             let packet_send = self.packet_send.clone();
-            // TODO: use data or ctl packet send chan?
+            let ch = if allow_drop_packet {
+                packet_send.get_data_packet_recv_chan().clone()
+            } else {
+                packet_send.get_ctl_packet_recv_chan().clone()
+            };
             tokio::spawn(async move {
-                let ret = packet_send
-                    .get_data_packet_recv_chan()
+                let ret = ch
                     .send(msg)
                     .await
                     .with_context(|| "send msg to self failed");
@@ -140,7 +143,7 @@ impl PeerMap {
                 //         tracing::error!("send msg to peer failed: {:?} drop it", e);
                 //     }
                 // } else {
-                    peer.send_msg(msg).await?;
+                peer.send_msg(msg).await?;
                 // }
             }
             None => {
