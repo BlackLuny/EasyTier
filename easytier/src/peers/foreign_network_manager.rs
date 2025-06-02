@@ -267,80 +267,84 @@ impl ForeignNetworkEntry {
         let pm_sender = self.pm_packet_sender.lock().await.take().unwrap();
         let network_name = self.network.network_name.clone();
 
-        self.tasks.lock().await.spawn(async move {
-            while let Ok(zc_packet) = recv_packet_from_chan(&mut recv).await {
-                let Some(hdr) = zc_packet.peer_manager_header() else {
-                    tracing::warn!("invalid packet, skip");
-                    continue;
-                };
-                tracing::info!(?hdr, "recv packet in foreign network manager");
-                let to_peer_id = hdr.to_peer_id.get();
-                let is_data = hdr.packet_type == PacketType::Data as u8;
-                if to_peer_id == my_node_id {
-                    if hdr.packet_type == PacketType::TaRpc as u8
-                        || hdr.packet_type == PacketType::RpcReq as u8
-                        || hdr.packet_type == PacketType::RpcResp as u8
-                    {
-                        rpc_sender.send(zc_packet).unwrap();
+        self.tasks
+            .lock()
+            .await
+            .spawn(tokio::task::coop::unconstrained(async move {
+                while let Ok(zc_packet) = recv_packet_from_chan(&mut recv).await {
+                    let Some(hdr) = zc_packet.peer_manager_header() else {
+                        tracing::warn!("invalid packet, skip");
                         continue;
-                    }
-                    tracing::trace!(?hdr, "ignore packet in foreign network");
-                } else {
-                    if !relay_data && hdr.packet_type == PacketType::Data as u8 {
-                        continue;
-                    }
-
-                    let gateway_peer_id = peer_map
-                        .get_gateway_peer_id(to_peer_id, NextHopPolicy::LeastHop)
-                        .await;
-
-                    if gateway_peer_id.is_some() && peer_map.has_peer(gateway_peer_id.unwrap()) {
-                        if let Err(e) = peer_map
-                            .send_msg_directly(zc_packet, gateway_peer_id.unwrap(), is_data)
-                            .await
+                    };
+                    tracing::info!(?hdr, "recv packet in foreign network manager");
+                    let to_peer_id = hdr.to_peer_id.get();
+                    let is_data = hdr.packet_type == PacketType::Data as u8;
+                    if to_peer_id == my_node_id {
+                        if hdr.packet_type == PacketType::TaRpc as u8
+                            || hdr.packet_type == PacketType::RpcReq as u8
+                            || hdr.packet_type == PacketType::RpcResp as u8
                         {
-                            tracing::error!(
-                                ?e,
-                                "send packet to foreign peer inside peer map failed"
-                            );
+                            rpc_sender.send(zc_packet).unwrap();
+                            continue;
                         }
+                        tracing::trace!(?hdr, "ignore packet in foreign network");
                     } else {
-                        let mut foreign_packet = ZCPacket::new_for_foreign_network(
-                            &network_name,
-                            to_peer_id,
-                            &zc_packet,
-                        );
-                        foreign_packet.fill_peer_manager_hdr(
-                            my_node_id,
-                            gateway_peer_id.unwrap_or(to_peer_id),
-                            PacketType::ForeignNetworkPacket as u8,
-                        );
-                        if is_data {
-                            if let Err(e) = pm_sender
-                                .get_data_packet_recv_chan()
-                                .try_send(foreign_packet)
-                            {
-                                tracing::error!(
-                                    "send foreign data packet to peer with pm failed: {:?}",
-                                    e
-                                );
-                            }
-                        } else {
-                            if let Err(e) = pm_sender
-                                .get_ctl_packet_recv_chan()
-                                .send(foreign_packet)
+                        if !relay_data && hdr.packet_type == PacketType::Data as u8 {
+                            continue;
+                        }
+
+                        let gateway_peer_id = peer_map
+                            .get_gateway_peer_id(to_peer_id, NextHopPolicy::LeastHop)
+                            .await;
+
+                        if gateway_peer_id.is_some() && peer_map.has_peer(gateway_peer_id.unwrap())
+                        {
+                            if let Err(e) = peer_map
+                                .send_msg_directly(zc_packet, gateway_peer_id.unwrap(), is_data)
                                 .await
                             {
                                 tracing::error!(
-                                    "send foreign ctrl packet to peer with pm failed: {:?}",
-                                    e
+                                    ?e,
+                                    "send packet to foreign peer inside peer map failed"
                                 );
+                            }
+                        } else {
+                            let mut foreign_packet = ZCPacket::new_for_foreign_network(
+                                &network_name,
+                                to_peer_id,
+                                &zc_packet,
+                            );
+                            foreign_packet.fill_peer_manager_hdr(
+                                my_node_id,
+                                gateway_peer_id.unwrap_or(to_peer_id),
+                                PacketType::ForeignNetworkPacket as u8,
+                            );
+                            if is_data {
+                                if let Err(e) = pm_sender
+                                    .get_data_packet_recv_chan()
+                                    .try_send(foreign_packet)
+                                {
+                                    tracing::error!(
+                                        "send foreign data packet to peer with pm failed: {:?}",
+                                        e
+                                    );
+                                }
+                            } else {
+                                if let Err(e) = pm_sender
+                                    .get_ctl_packet_recv_chan()
+                                    .send(foreign_packet)
+                                    .await
+                                {
+                                    tracing::error!(
+                                        "send foreign ctrl packet to peer with pm failed: {:?}",
+                                        e
+                                    );
+                                }
                             }
                         }
                     }
                 }
-            }
-        });
+            }));
     }
 
     async fn prepare(&self, my_peer_id: PeerId, accessor: Box<dyn GlobalForeignNetworkAccessor>) {

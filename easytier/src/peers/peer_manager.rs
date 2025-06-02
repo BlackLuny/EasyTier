@@ -522,92 +522,105 @@ impl PeerManager {
         let foreign_mgr = self.foreign_network_manager.clone();
         let encryptor = self.encryptor.clone();
         let compress_algo = self.data_compress_algo;
-        self.tasks.lock().await.spawn(async move {
-            tracing::trace!("start_peer_recv");
-            while let Ok(ret) = recv_packet_from_chan(&mut recv).await {
-                let Err(mut ret) =
-                    Self::try_handle_foreign_network_packet(ret, my_peer_id, &peers, &foreign_mgr)
-                        .await
-                else {
-                    continue;
-                };
-
-                let Some(hdr) = ret.mut_peer_manager_header() else {
-                    tracing::warn!(?ret, "invalid packet, skip");
-                    continue;
-                };
-
-                tracing::trace!(?hdr, "peer recv a packet...");
-                let from_peer_id = hdr.from_peer_id.get();
-                let to_peer_id = hdr.to_peer_id.get();
-                let allow_drop_packet = hdr.packet_type == PacketType::Data as u8;
-                if to_peer_id != my_peer_id {
-                    if hdr.forward_counter > 7 {
-                        tracing::warn!(?hdr, "forward counter exceed, drop packet");
-                        continue;
-                    }
-
-                    if hdr.forward_counter > 2 && hdr.is_latency_first() {
-                        tracing::trace!(?hdr, "set_latency_first false because too many hop");
-                        hdr.set_latency_first(false);
-                    }
-
-                    hdr.forward_counter += 1;
-
-                    if from_peer_id == my_peer_id
-                        && (hdr.packet_type == PacketType::Data as u8
-                            || hdr.packet_type == PacketType::KcpSrc as u8
-                            || hdr.packet_type == PacketType::KcpDst as u8)
-                    {
-                        let _ = Self::try_compress_and_encrypt(compress_algo, &encryptor, &mut ret)
-                            .await;
-                    }
-
-                    tracing::trace!(?to_peer_id, ?my_peer_id, "need forward");
-                    let ret = Self::send_msg_internal(
-                        &peers,
-                        &foreign_client,
+        self.tasks
+            .lock()
+            .await
+            .spawn(tokio::task::coop::unconstrained(async move {
+                tracing::trace!("start_peer_recv");
+                while let Ok(ret) = recv_packet_from_chan(&mut recv).await {
+                    let Err(mut ret) = Self::try_handle_foreign_network_packet(
                         ret,
-                        to_peer_id,
-                        allow_drop_packet,
+                        my_peer_id,
+                        &peers,
+                        &foreign_mgr,
                     )
-                    .await;
-                    if ret.is_err() {
-                        tracing::error!(?ret, ?to_peer_id, ?from_peer_id, "forward packet error");
-                    }
-                } else {
-                    if let Err(e) = encryptor.decrypt(&mut ret) {
-                        tracing::error!(?e, "decrypt failed");
+                    .await
+                    else {
                         continue;
-                    }
+                    };
 
-                    let compressor = DefaultCompressor {};
-                    if let Err(e) = compressor.decompress(&mut ret).await {
-                        tracing::error!(?e, "decompress failed");
+                    let Some(hdr) = ret.mut_peer_manager_header() else {
+                        tracing::warn!(?ret, "invalid packet, skip");
                         continue;
-                    }
+                    };
 
-                    let mut processed = false;
-                    let mut zc_packet = Some(ret);
-                    let mut idx = 0;
-                    for pipeline in pipe_line.read().await.iter().rev() {
-                        tracing::trace!(?zc_packet, ?idx, "try_process_packet_from_peer");
-                        idx += 1;
-                        zc_packet = pipeline
-                            .try_process_packet_from_peer(zc_packet.unwrap())
-                            .await;
-                        if zc_packet.is_none() {
-                            processed = true;
-                            break;
+                    tracing::trace!(?hdr, "peer recv a packet...");
+                    let from_peer_id = hdr.from_peer_id.get();
+                    let to_peer_id = hdr.to_peer_id.get();
+                    let allow_drop_packet = hdr.packet_type == PacketType::Data as u8;
+                    if to_peer_id != my_peer_id {
+                        if hdr.forward_counter > 7 {
+                            tracing::warn!(?hdr, "forward counter exceed, drop packet");
+                            continue;
+                        }
+
+                        if hdr.forward_counter > 2 && hdr.is_latency_first() {
+                            tracing::trace!(?hdr, "set_latency_first false because too many hop");
+                            hdr.set_latency_first(false);
+                        }
+
+                        hdr.forward_counter += 1;
+
+                        if from_peer_id == my_peer_id
+                            && (hdr.packet_type == PacketType::Data as u8
+                                || hdr.packet_type == PacketType::KcpSrc as u8
+                                || hdr.packet_type == PacketType::KcpDst as u8)
+                        {
+                            let _ =
+                                Self::try_compress_and_encrypt(compress_algo, &encryptor, &mut ret)
+                                    .await;
+                        }
+
+                        tracing::trace!(?to_peer_id, ?my_peer_id, "need forward");
+                        let ret = Self::send_msg_internal(
+                            &peers,
+                            &foreign_client,
+                            ret,
+                            to_peer_id,
+                            allow_drop_packet,
+                        )
+                        .await;
+                        if ret.is_err() {
+                            tracing::error!(
+                                ?ret,
+                                ?to_peer_id,
+                                ?from_peer_id,
+                                "forward packet error"
+                            );
+                        }
+                    } else {
+                        if let Err(e) = encryptor.decrypt(&mut ret) {
+                            tracing::error!(?e, "decrypt failed");
+                            continue;
+                        }
+
+                        let compressor = DefaultCompressor {};
+                        if let Err(e) = compressor.decompress(&mut ret).await {
+                            tracing::error!(?e, "decompress failed");
+                            continue;
+                        }
+
+                        let mut processed = false;
+                        let mut zc_packet = Some(ret);
+                        let mut idx = 0;
+                        for pipeline in pipe_line.read().await.iter().rev() {
+                            tracing::trace!(?zc_packet, ?idx, "try_process_packet_from_peer");
+                            idx += 1;
+                            zc_packet = pipeline
+                                .try_process_packet_from_peer(zc_packet.unwrap())
+                                .await;
+                            if zc_packet.is_none() {
+                                processed = true;
+                                break;
+                            }
+                        }
+                        if !processed {
+                            tracing::error!(?zc_packet, "unhandled packet");
                         }
                     }
-                    if !processed {
-                        tracing::error!(?zc_packet, "unhandled packet");
-                    }
                 }
-            }
-            panic!("done_peer_recv");
-        });
+                panic!("done_peer_recv");
+            }));
     }
 
     pub async fn add_packet_process_pipeline(&self, pipeline: BoxPeerPacketFilter) {

@@ -310,7 +310,7 @@ impl PeerConn {
         let conn_info_for_instrument = self.get_conn_info();
 
         self.tasks.spawn(
-            async move {
+            tokio::task::coop::unconstrained(async move {
                 tracing::info!("start recving peer conn packet");
                 let mut task_ret = Ok(());
                 // 接收peer的数据包，发送给peer manager或者自行处理
@@ -369,7 +369,7 @@ impl PeerConn {
                 close_event_notifier.notify_close();
 
                 task_ret
-            }
+            })
             .instrument(
                 tracing::info_span!("peer conn recv loop", conn_info = ?conn_info_for_instrument),
             ),

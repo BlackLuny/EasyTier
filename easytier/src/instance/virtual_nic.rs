@@ -525,37 +525,39 @@ impl NicCtx {
         let Some(mgr) = self.peer_mgr.upgrade() else {
             return Err(anyhow::anyhow!("peer manager not available").into());
         };
-        self.tasks.spawn(async move {
-            while let Some(ret) = stream.next().await {
-                if ret.is_err() {
-                    tracing::error!("read from nic failed: {:?}", ret);
-                    break;
+        self.tasks
+            .spawn(tokio::task::coop::unconstrained(async move {
+                while let Some(ret) = stream.next().await {
+                    if ret.is_err() {
+                        tracing::error!("read from nic failed: {:?}", ret);
+                        break;
+                    }
+                    Self::do_forward_nic_to_peers_ipv4(ret.unwrap(), mgr.as_ref()).await;
                 }
-                Self::do_forward_nic_to_peers_ipv4(ret.unwrap(), mgr.as_ref()).await;
-            }
-            panic!("nic stream closed");
-        });
+                panic!("nic stream closed");
+            }));
 
         Ok(())
     }
 
     fn do_forward_peers_to_nic(&mut self, mut sink: Pin<Box<dyn ZCPacketSink>>) {
         let channel = self.peer_packet_receiver.clone();
-        self.tasks.spawn(async move {
-            // unlock until coroutine finished
-            let mut channel = channel.lock().await;
-            while let Ok(packet) = recv_packet_from_chan(&mut channel).await {
-                tracing::trace!(
-                    "[USER_PACKET] forward packet from peers to nic. packet: {:?}",
-                    packet
-                );
-                let ret = sink.send(packet).await;
-                if ret.is_err() {
-                    tracing::error!(?ret, "do_forward_tunnel_to_nic sink error");
+        self.tasks
+            .spawn(tokio::task::coop::unconstrained(async move {
+                // unlock until coroutine finished
+                let mut channel = channel.lock().await;
+                while let Ok(packet) = recv_packet_from_chan(&mut channel).await {
+                    tracing::trace!(
+                        "[USER_PACKET] forward packet from peers to nic. packet: {:?}",
+                        packet
+                    );
+                    let ret = sink.send(packet).await;
+                    if ret.is_err() {
+                        tracing::error!(?ret, "do_forward_tunnel_to_nic sink error");
+                    }
                 }
-            }
-            panic!("peer packet receiver closed");
-        });
+                panic!("peer packet receiver closed");
+            }));
     }
 
     async fn run_proxy_cidrs_route_updater(&mut self) -> Result<(), Error> {
