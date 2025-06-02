@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use dashmap::DashMap;
 
@@ -34,7 +34,7 @@ pub struct Peer {
 
     shutdown_notifier: Arc<tokio::sync::Notify>,
 
-    default_conn: std::sync::RwLock<Option<Timed<ArcPeerConn>>>,
+    default_conn: std::sync::RwLock<Option<Timed<Weak<PeerConn>>>>,
 }
 
 impl Peer {
@@ -127,7 +127,9 @@ impl Peer {
             let guard = self.default_conn.read().unwrap();
             if let Some(conn) = &*guard {
                 if !conn.is_expired(std::time::Duration::from_secs(5)) {
-                    return Some(conn.get().clone());
+                    if let Some(conn) = conn.get().upgrade() {
+                        return Some(conn);
+                    }
                 }
             }
         }
@@ -143,7 +145,7 @@ impl Peer {
             }
         }
         if let Some(conn) = min_conn {
-            *self.default_conn.write().unwrap() = Some(Timed::new(conn.clone()));
+            *self.default_conn.write().unwrap() = Some(Timed::new(Arc::downgrade(&conn)));
             return Some(conn);
         }
         None
@@ -198,7 +200,7 @@ impl Peer {
         for conn in all_conns {
             match conn.try_send_msg(msg) {
                 Ok(()) => {
-                    *self.default_conn.write().unwrap() = Some(Timed::new(conn));
+                    *self.default_conn.write().unwrap() = Some(Timed::new(Arc::downgrade(&conn)));
                     return Ok(());
                 }
                 Err(e) => {
@@ -233,7 +235,7 @@ impl Peer {
 
     pub fn get_default_conn(&self) -> Option<ArcPeerConn> {
         let guard = self.default_conn.read().unwrap();
-        guard.as_ref().map(|conn| conn.get().clone())
+        guard.as_ref().and_then(|conn| conn.get().upgrade())
     }
 }
 

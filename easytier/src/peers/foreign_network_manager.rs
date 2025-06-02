@@ -264,7 +264,7 @@ impl ForeignNetworkEntry {
         let rpc_sender = self.rpc_sender.clone();
         let peer_map = self.peer_map.clone();
         let relay_data = self.relay_data;
-        let pm_sender = self.pm_packet_sender.lock().await.take().unwrap();
+        let pm_sender = self.pm_packet_sender.lock().await.as_ref().map(|v| v.clone()).unwrap();
         let network_name = self.network.network_name.clone();
 
         self.tasks
