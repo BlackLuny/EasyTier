@@ -659,12 +659,7 @@ impl PeerManager {
                 if hdr.packet_type == PacketType::Data as u8 {
                     tracing::trace!(?packet, "send packet to nic channel");
                     // TODO: use a function to get the body ref directly for zero copy
-                    match self.nic_channel.try_send(packet) {
-                        Ok(()) => {}
-                        Err(e) => {
-                            tracing::error!(?e, "nic channel send failed");
-                        }
-                    }
+                    let _ = self.nic_channel.send(packet).await;
                     None
                 } else {
                     Some(packet)
