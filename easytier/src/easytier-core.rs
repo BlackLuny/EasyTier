@@ -520,7 +520,7 @@ impl Cli {
 
     fn parse_rpc_portal(rpc_portal: String) -> anyhow::Result<SocketAddr> {
         if let Ok(port) = rpc_portal.parse::<u16>() {
-            return Ok(format!("0.0.0.0:{}", port).parse().unwrap());
+            return Ok(format!("127.0.0.1:{}", port).parse().unwrap());
         }
 
         Ok(rpc_portal.parse()?)

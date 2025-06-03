@@ -529,7 +529,7 @@ impl NetworkConfig {
         }
 
         cfg.set_rpc_portal(
-            format!("0.0.0.0:{}", self.rpc_port.unwrap_or_default())
+            format!("127.0.0.1:{}", self.rpc_port.unwrap_or_default())
                 .parse()
                 .with_context(|| format!("failed to parse rpc portal port: {:?}", self.rpc_port))?,
         );
