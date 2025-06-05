@@ -13,7 +13,7 @@ use std::{
 use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
 use petgraph::{
-    algo::{all_simple_paths, astar, dijkstra},
+    algo::{all_simple_paths, dijkstra, spfa},
     graph::NodeIndex,
     Directed, Graph,
 };
@@ -739,6 +739,31 @@ impl RouteTable {
     ) -> NextHopMap {
         let next_hop_map = NextHopMap::new();
         let my_node_idx = *idx_map.get(&my_peer_id).unwrap();
+
+        let Ok(spfa_path) = spfa(graph, my_node_idx, |e| *e.weight()) else {
+            return next_hop_map;
+        };
+
+        let get_next_node_to = |node_idx: NodeIndex| -> Option<(i32, NodeIndex, usize)> {
+            let mut cur_node_idx = node_idx;
+            let mut path_len = 1;
+            let Some(dist) = spfa_path.distances.get(node_idx.index()) else {
+                return None;
+            };
+            loop {
+                let Some(Some(prev)) = spfa_path.predecessors.get(cur_node_idx.index()) else {
+                    break;
+                };
+                if *prev == my_node_idx {
+                    break;
+                }
+                cur_node_idx = *prev;
+                path_len += 1;
+            }
+
+            return Some((*dist, cur_node_idx, path_len));
+        };
+
         for item in idx_map.iter() {
             if *item.key() == my_peer_id {
                 continue;
@@ -746,22 +771,16 @@ impl RouteTable {
 
             let dst_peer_node_idx = *item.value();
 
-            let Some((cost, path)) = astar::astar(
-                graph,
-                my_node_idx,
-                |node_idx| node_idx == dst_peer_node_idx,
-                |e| *e.weight(),
-                |_| 0,
-            ) else {
+            let Some((cost, next_node_idx, path_len)) = get_next_node_to(dst_peer_node_idx) else {
                 continue;
             };
 
             next_hop_map.insert(
                 *item.key(),
                 NextHopInfo {
-                    next_hop_peer_id: *graph.node_weight(path[1]).unwrap(),
+                    next_hop_peer_id: *graph.node_weight(next_node_idx).unwrap(),
                     path_latency: cost,
-                    path_len: path.len(),
+                    path_len,
                 },
             );
         }
@@ -2762,5 +2781,105 @@ mod tests {
         let req2 = SyncRouteInfoRequest::decode(out_bytes.as_slice()).unwrap();
 
         assert_eq!(req, req2);
+    }
+
+    #[tokio::test]
+    async fn test_spfa_backtrack_algorithm() {
+        use petgraph::algo::spfa;
+        use petgraph::{graph::NodeIndex, Graph};
+
+        // 创建与 petgraph 文档示例相同的图
+        // Graph represented with the weight of each edge.
+        //
+        //     3       1
+        // a ----- b ----- c
+        // | 2     | 7     |
+        // d       f       | -4
+        // | -1    | 1     |
+        // \------ e ------/
+
+        let mut graph: Graph<u32, i32, petgraph::Directed> = Graph::new();
+        let a = graph.add_node(0); // node a, peer_id = 0
+        let b = graph.add_node(1); // node b, peer_id = 1
+        let c = graph.add_node(2); // node c, peer_id = 2
+        let d = graph.add_node(3); // node d, peer_id = 3
+        let e = graph.add_node(4); // node e, peer_id = 4
+        let f = graph.add_node(5); // node f, peer_id = 5
+
+        graph.extend_with_edges(&[
+            (a, b, 3),  // a -> b, cost = 3
+            (a, d, 2),  // a -> d, cost = 2
+            (b, c, 1),  // b -> c, cost = 1
+            (b, f, 7),  // b -> f, cost = 7
+            (c, e, -4), // c -> e, cost = -4
+            (d, e, -1), // d -> e, cost = -1
+            (e, f, 1),  // e -> f, cost = 1
+        ]);
+
+        // 运行 SPFA 算法，从节点 a 开始
+        let spfa_result = spfa(&graph, a, |edge| *edge.weight());
+        assert!(spfa_result.is_ok());
+        let spfa_path = spfa_result.unwrap();
+
+        // 先打印实际的 SPFA 结果以了解算法输出
+        println!("SPFA 距离结果: {:?}", spfa_path.distances);
+        println!("SPFA 前驱结果: {:?}", spfa_path.predecessors);
+
+        // 验证距离结果（实际运行得到的结果）
+        assert_eq!(spfa_path.distances, vec![0, 3, 4, 2, 0, 1]);
+
+        // 测试我们的回溯算法
+        let my_node_idx = a;
+
+        let get_next_node_to = |node_idx: NodeIndex| -> Option<(i32, NodeIndex, usize)> {
+            let mut cur_node_idx = node_idx;
+            let mut path_len = 1;
+            let Some(dist) = spfa_path.distances.get(node_idx.index()) else {
+                return None;
+            };
+            loop {
+                let Some(Some(prev)) = spfa_path.predecessors.get(cur_node_idx.index()) else {
+                    break;
+                };
+                if *prev == my_node_idx {
+                    break;
+                }
+                cur_node_idx = *prev;
+                path_len += 1;
+            }
+            return Some((*dist, cur_node_idx, path_len));
+        };
+
+        // 测试所有节点并打印结果
+        for (name, node_idx) in [("b", b), ("c", c), ("d", d), ("e", e), ("f", f)] {
+            if let Some((total_cost, next_node, path_len)) = get_next_node_to(node_idx) {
+                println!(
+                    "到节点 {}: 总距离={}, 下一跳={:?}, 路径长度={}",
+                    name, total_cost, next_node, path_len
+                );
+            }
+        }
+
+        // 基本验证：回溯算法应该正确返回距离
+        let result_b = get_next_node_to(b).unwrap();
+        assert_eq!(result_b.0, 3); // 到 b 的距离应该是 3
+        assert_eq!(result_b.1, b); // 下一个节点应该是 b 本身（直连）
+        assert_eq!(result_b.2, 1); // 路径长度为 1（直连）
+
+        let result_c = get_next_node_to(c).unwrap();
+        assert_eq!(result_c.0, 4); // 到 c 的距离应该是 4
+
+        let result_d = get_next_node_to(d).unwrap();
+        assert_eq!(result_d.0, 2); // 到 d 的距离应该是 2
+        assert_eq!(result_d.1, d); // 下一个节点应该是 d 本身（直连）
+        assert_eq!(result_d.2, 1); // 路径长度为 1（直连）
+
+        let result_e = get_next_node_to(e).unwrap();
+        assert_eq!(result_e.0, 0); // 到 e 的距离应该是 0 (注意这里可能有负权环)
+
+        let result_f = get_next_node_to(f).unwrap();
+        assert_eq!(result_f.0, 1); // 到 f 的距离应该是 1
+
+        println!("✅ 基本回溯算法测试通过!");
     }
 }
