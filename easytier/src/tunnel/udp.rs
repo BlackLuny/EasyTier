@@ -735,10 +735,7 @@ impl UdpTunnelConnector {
         tokio::spawn(
             async move {
                 tokio::select! {
-                    _ = close_event_recv.recv() => {
-                        tracing::debug!("connector udp close event");
-                        return;
-                    }
+                    biased;
                     _ = udp_recv_from_socket_forward_task(socket_clone,false, |zc_packet, addr| {
                         tracing::trace!(?addr, "connector udp forward task done");
                         if let Err(e) = udp_conn.handle_packet_from_remote(zc_packet) {
@@ -746,6 +743,10 @@ impl UdpTunnelConnector {
                         }
                     }) => {
                         tracing::debug!("connector udp forward task done");
+                        return;
+                    }
+                    _ = close_event_recv.recv() => {
+                        tracing::debug!("connector udp close event");
                         return;
                     }
                 }
