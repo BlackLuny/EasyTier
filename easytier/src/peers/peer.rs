@@ -116,8 +116,14 @@ impl Peer {
     }
 
     pub async fn add_peer_conn(&self, mut conn: PeerConn) {
-        let close_event_sender = self.close_event_sender.clone();
         let close_notifier = conn.get_close_notifier();
+        let conn_info = conn.get_conn_info();
+
+        conn.start_recv_loop(self.packet_recv_chain_pair.clone()).await;
+        conn.start_pingpong();
+        self.conns.insert(conn.get_conn_id(), Arc::new(conn));
+
+        let close_event_sender = self.close_event_sender.clone();
         tokio::spawn(async move {
             let conn_id = close_notifier.get_conn_id();
             if let Some(mut waiter) = close_notifier.get_waiter().await {
@@ -128,13 +134,8 @@ impl Peer {
             }
         });
 
-        conn.start_recv_loop(self.packet_recv_chain_pair.clone())
-            .await;
-        conn.start_pingpong();
-
         self.global_ctx
-            .issue_event(GlobalCtxEvent::PeerConnAdded(conn.get_conn_info()));
-        self.conns.insert(conn.get_conn_id(), Arc::new(conn));
+            .issue_event(GlobalCtxEvent::PeerConnAdded(conn_info));
     }
 
     fn select_conn(&self) -> Option<ArcPeerConn> {

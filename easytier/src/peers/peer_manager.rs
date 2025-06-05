@@ -1149,7 +1149,8 @@ mod tests {
     use crate::{
         common::{config::Flags, global_ctx::tests::get_mock_global_ctx},
         connector::{
-            create_connector_by_url, udp_hole_punch::tests::create_mock_peer_manager_with_mock_stun,
+            create_connector_by_url, direct::PeerManagerForDirectConnector,
+            udp_hole_punch::tests::create_mock_peer_manager_with_mock_stun,
         },
         instance::listeners::get_listener_by_url,
         peers::{
@@ -1160,7 +1161,12 @@ mod tests {
             tests::{connect_peer_manager, wait_route_appear, wait_route_appear_with_cost},
         },
         proto::common::{CompressionAlgoPb, NatType, PeerFeatureFlag},
-        tunnel::{common::tests::wait_for_condition, TunnelConnector, TunnelListener},
+        tunnel::{
+            common::tests::wait_for_condition,
+            filter::{tests::DropSendTunnelFilter, TunnelWithFilter},
+            ring::create_ring_tunnel_pair,
+            TunnelConnector, TunnelListener,
+        },
     };
 
     use super::PeerManager;
@@ -1339,6 +1345,12 @@ mod tests {
         let peer_mgr_d = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
         let peer_mgr_e = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
 
+        println!("peer_mgr_a: {}", peer_mgr_a.my_peer_id);
+        println!("peer_mgr_b: {}", peer_mgr_b.my_peer_id);
+        println!("peer_mgr_c: {}", peer_mgr_c.my_peer_id);
+        println!("peer_mgr_d: {}", peer_mgr_d.my_peer_id);
+        println!("peer_mgr_e: {}", peer_mgr_e.my_peer_id);
+
         connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
         connect_peer_manager(peer_mgr_b.clone(), peer_mgr_c.clone()).await;
 
@@ -1393,5 +1405,37 @@ mod tests {
             .get_next_hop_with_policy(peer_mgr_c.my_peer_id, NextHopPolicy::LeastCost)
             .await;
         assert_eq!(ret, Some(peer_mgr_b.my_peer_id));
+    }
+
+    #[tokio::test]
+    async fn test_client_inbound_blackhole() {
+        let peer_mgr_a = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        let peer_mgr_b = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+
+        // a is client, b is server
+
+        let (a_ring, b_ring) = create_ring_tunnel_pair();
+        let a_ring = Box::new(TunnelWithFilter::new(
+            a_ring,
+            DropSendTunnelFilter::new(2, 50000),
+        ));
+
+        let a_mgr_copy = peer_mgr_a.clone();
+        tokio::spawn(async move {
+            a_mgr_copy.add_client_tunnel(a_ring).await.unwrap();
+        });
+        let b_mgr_copy = peer_mgr_b.clone();
+        tokio::spawn(async move {
+            b_mgr_copy.add_tunnel_as_server(b_ring, true).await.unwrap();
+        });
+
+        wait_for_condition(
+            || async {
+                let peers = peer_mgr_a.list_peers().await;
+                peers.is_empty()
+            },
+            Duration::from_secs(10),
+        )
+        .await;
     }
 }
