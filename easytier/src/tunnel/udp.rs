@@ -319,13 +319,13 @@ impl UdpConnection {
         close_event_sender: UdpCloseEventSender,
     ) -> Self {
         let s = socket.clone();
-        let forward_task = tokio::spawn(async move {
+        let forward_task = tokio::spawn(tokio::task::coop::unconstrained(async move {
             let close_event_sender = close_event_sender;
             let err = forward_from_ring_to_udp(ring_recv, &s, &dst_addr, conn_id).await;
             if let Err(e) = close_event_sender.send((dst_addr, err)) {
                 tracing::error!(?e, "udp send close event error");
             }
-        })
+        }))
         .into();
 
         Self {
@@ -565,7 +565,9 @@ impl TunnelListener for UdpTunnelListener {
         self.forward_tasks
             .lock()
             .unwrap()
-            .spawn(self.data.clone().do_forward_task());
+            .spawn(tokio::task::coop::unconstrained(
+                self.data.clone().do_forward_task(),
+            ));
 
         let sock_map = Arc::downgrade(&self.data.sock_map.clone());
         let mut close_recv = self.close_event_recv.take().unwrap();
@@ -732,7 +734,7 @@ impl UdpTunnelConnector {
         );
 
         let socket_clone = socket.clone();
-        tokio::spawn(
+        tokio::spawn(tokio::task::coop::unconstrained(
             async move {
                 tokio::select! {
                     biased;
@@ -756,7 +758,7 @@ impl UdpTunnelConnector {
                 ?conn_id,
                 ?dst_addr,
             )),
-        );
+        ));
 
         Ok(Box::new(TunnelWrapper::new(
             Box::new(RingStream::new(ring_for_recv_udp)),
