@@ -163,7 +163,8 @@ impl PeerMap {
         let Some(peer) = self.get_peer_by_id(peer_id) else {
             return None;
         };
-        peer.get_default_conn().map(|conn| conn.get_latency_us())
+        let conn_id = peer.get_default_conn_id();
+        peer.get_conn_by_id(&conn_id).map(|p| p.get_latency_us())
     }
 
     pub async fn get_gateway_peer_id(
@@ -324,8 +325,7 @@ impl PeerMap {
 
     pub fn get_peer_default_conn_id(&self, peer_id: PeerId) -> Option<PeerConnId> {
         self.get_peer_by_id(peer_id)
-            .and_then(|p| p.get_default_conn())
-            .map(|conn| conn.get_conn_id())
+            .map(|p| p.get_default_conn_id())
     }
 
     pub async fn close_peer_conn(

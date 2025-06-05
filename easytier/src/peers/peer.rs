@@ -1,5 +1,6 @@
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
+use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
 
 use tokio::{select, sync::mpsc, task::JoinHandle};
@@ -7,8 +8,7 @@ use tokio::{select, sync::mpsc, task::JoinHandle};
 use tracing::Instrument;
 
 use super::peer_conn::{PeerConn, PeerConnId};
-use crate::common::timed_cache::Timed;
-use crate::tunnel::TunnelError;
+use crate::common::scoped_task::ScopedTask;
 use crate::{
     common::{
         error::Error,
@@ -34,7 +34,8 @@ pub struct Peer {
 
     shutdown_notifier: Arc<tokio::sync::Notify>,
 
-    default_conn: std::sync::RwLock<Option<Timed<Weak<PeerConn>>>>,
+    default_conn_id: Arc<AtomicCell<PeerConnId>>,
+    default_conn_id_clear_task: ScopedTask<()>,
 }
 
 impl Peer {
@@ -86,6 +87,19 @@ impl Peer {
             )),
         );
 
+        let default_conn_id = Arc::new(AtomicCell::new(PeerConnId::default()));
+
+        let conns_copy = conns.clone();
+        let default_conn_id_copy = default_conn_id.clone();
+        let default_conn_id_clear_task = ScopedTask::from(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                if conns_copy.len() > 1 {
+                    default_conn_id_copy.store(PeerConnId::default());
+                }
+            }
+        }));
+
         Peer {
             peer_node_id,
             conns: conns.clone(),
@@ -96,7 +110,8 @@ impl Peer {
             close_event_listener,
 
             shutdown_notifier,
-            default_conn: std::sync::RwLock::new(None),
+            default_conn_id,
+            default_conn_id_clear_task,
         }
     }
 
@@ -123,96 +138,33 @@ impl Peer {
     }
 
     fn select_conn(&self) -> Option<ArcPeerConn> {
-        {
-            let guard = self.default_conn.read().unwrap();
-            if let Some(conn) = &*guard {
-                if !conn.is_expired(std::time::Duration::from_secs(5)) {
-                    if let Some(conn) = conn.get().upgrade() {
-                        return Some(conn);
-                    }
-                }
-            }
+        let default_conn_id = self.default_conn_id.load();
+        if let Some(conn) = self.conns.get(&default_conn_id) {
+            return Some(conn.clone());
         }
 
         // find a conn with the smallest latency
         let mut min_latency = std::u64::MAX;
-        let mut min_conn = None;
         for conn in self.conns.iter() {
-            let latency = conn.value().get_latency_us();
+            let latency = conn.value().get_stats().latency_us;
             if latency < min_latency {
                 min_latency = latency;
-                min_conn = Some(conn.clone());
+                self.default_conn_id.store(conn.get_conn_id());
             }
         }
-        if let Some(conn) = min_conn {
-            *self.default_conn.write().unwrap() = Some(Timed::new(Arc::downgrade(&conn)));
-            return Some(conn);
-        }
-        None
+
+        self.conns
+            .get(&self.default_conn_id.load())
+            .map(|conn| conn.clone())
     }
 
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
-        if let Err(e) = self.try_send_msg_internal(msg) {
-            let msg = match e {
-                Error::TunnelError(TunnelError::BufferFull(e)) => e,
-                Error::TunnelError(TunnelError::ChannelClosed(e)) => e,
-                _ => return Err(e),
-            };
-            let Some(conn) = self.select_conn() else {
-                return Err(Error::PeerNoConnectionError(self.peer_node_id));
-            };
-            conn.send_msg(msg).await?;
-        }
-        Ok(())
-    }
-
-    pub fn try_send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
-        self.try_send_msg_internal(msg)
-    }
-
-    fn try_send_msg_internal(&self, msg: ZCPacket) -> Result<(), Error> {
         let Some(conn) = self.select_conn() else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
-        let e = match conn.try_send_msg(msg) {
-            Ok(()) => {
-                return Ok(());
-            }
-            Err(e) => e,
-        };
-        if self.conns.len() == 1 {
-            return Err(Error::TunnelError(e));
-        }
-        let mut msg = match e {
-            TunnelError::BufferFull(e) => e,
-            TunnelError::ChannelClosed(e) => e,
-            _ => return Err(Error::TunnelError(e)),
-        };
-        // try other conn
-        // find a conn with the smallest latency
-        let mut all_conns = self
-            .conns
-            .iter()
-            .map(|conn| conn.clone())
-            .collect::<Vec<_>>();
-        all_conns.sort_by_key(|conn| conn.get_latency_us());
+        conn.send_msg(msg).await?;
 
-        for conn in all_conns {
-            match conn.try_send_msg(msg) {
-                Ok(()) => {
-                    *self.default_conn.write().unwrap() = Some(Timed::new(Arc::downgrade(&conn)));
-                    return Ok(());
-                }
-                Err(e) => {
-                    msg = match e {
-                        TunnelError::BufferFull(e) => e,
-                        TunnelError::ChannelClosed(e) => e,
-                        _ => return Err(Error::TunnelError(e)),
-                    };
-                }
-            }
-        }
-        Err(Error::TunnelError(TunnelError::BufferFull(msg)))
+        Ok(())
     }
 
     pub async fn close_peer_conn(&self, conn_id: &PeerConnId) -> Result<(), Error> {
@@ -233,9 +185,12 @@ impl Peer {
         ret
     }
 
-    pub fn get_default_conn(&self) -> Option<ArcPeerConn> {
-        let guard = self.default_conn.read().unwrap();
-        guard.as_ref().and_then(|conn| conn.get().upgrade())
+    pub fn get_default_conn_id(&self) -> PeerConnId {
+        self.default_conn_id.load()
+    }
+
+    pub fn get_conn_by_id(&self, conn_id: &PeerConnId) -> Option<ArcPeerConn> {
+        self.conns.get(conn_id).map(|p| p.clone())
     }
 }
 
