@@ -60,7 +60,7 @@ impl PingIntervalController {
         Self {
             throughput,
             loss_counter,
-            interval: tokio::time::interval(Duration::from_secs(1)),
+            interval: tokio::time::interval(Duration::from_secs(10)),
             logic_time: 0,
             last_send_logic_time: 0,
 
@@ -171,7 +171,7 @@ impl PeerConnPinger {
 
         let now = std::time::Instant::now();
         // wait until we get a pong packet in ctrl_resp_receiver
-        let resp = timeout(Duration::from_secs(2), async {
+        let resp = timeout(Duration::from_secs(3), async {
             loop {
                 match receiver.recv().await {
                     Ok(p) => {
