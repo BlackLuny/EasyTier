@@ -769,7 +769,7 @@ impl RouteTable {
         next_hop_map
     }
 
-    fn build_from_synced_info<T: RouteCostCalculatorInterface>(
+    async fn build_from_synced_info<T: RouteCostCalculatorInterface>(
         &self,
         my_peer_id: PeerId,
         synced_info: &SyncedRouteInfo,
@@ -811,7 +811,11 @@ impl RouteTable {
         let next_hop_map = if matches!(policy, NextHopPolicy::LeastHop) {
             Self::gen_next_hop_map_with_least_hop(my_peer_id, &graph, &idx_map, &mut cost_calc)
         } else {
-            Self::gen_next_hop_map_with_least_cost(my_peer_id, &graph, &idx_map)
+            tokio::task::spawn_blocking(move || {
+                Self::gen_next_hop_map_with_least_cost(my_peer_id, &graph, &idx_map)
+            })
+            .await
+            .unwrap()
         };
         for item in next_hop_map.iter() {
             self.next_hop_map.insert(*item.key(), *item.value());
@@ -1084,7 +1088,7 @@ struct PeerRouteServiceImpl {
 
     interface: Mutex<Option<RouteInterfaceBox>>,
 
-    cost_calculator: std::sync::Mutex<Option<RouteCostCalculator>>,
+    cost_calculator: tokio::sync::Mutex<Option<RouteCostCalculator>>,
     route_table: RouteTable,
     route_table_with_cost: RouteTable,
     foreign_network_owner_map: DashMap<NetworkIdentity, Vec<PeerId>>,
@@ -1125,7 +1129,7 @@ impl PeerRouteServiceImpl {
 
             interface: Mutex::new(None),
 
-            cost_calculator: std::sync::Mutex::new(Some(Box::new(DefaultRouteCostCalculator))),
+            cost_calculator: tokio::sync::Mutex::new(Some(Box::new(DefaultRouteCostCalculator))),
 
             route_table: RouteTable::new(),
             route_table_with_cost: RouteTable::new(),
@@ -1177,13 +1181,13 @@ impl PeerRouteServiceImpl {
             .collect()
     }
 
-    fn update_my_peer_info(&self) -> bool {
+    async fn update_my_peer_info(&self) -> bool {
         if self.synced_route_info.update_my_peer_info(
             self.my_peer_id,
             self.my_peer_route_id,
             &self.global_ctx,
         ) {
-            self.update_route_table_and_cached_local_conn_bitmap();
+            self.update_route_table_and_cached_local_conn_bitmap().await;
             return true;
         }
         false
@@ -1196,7 +1200,7 @@ impl PeerRouteServiceImpl {
             .update_my_conn_info(self.my_peer_id, connected_peers);
 
         if updated {
-            self.update_route_table_and_cached_local_conn_bitmap();
+            self.update_route_table_and_cached_local_conn_bitmap().await;
         }
 
         updated
@@ -1232,23 +1236,27 @@ impl PeerRouteServiceImpl {
         updated
     }
 
-    fn update_route_table(&self) {
-        let mut calc_locked = self.cost_calculator.lock().unwrap();
+    async fn update_route_table(&self) {
+        let mut calc_locked = self.cost_calculator.lock().await;
 
         calc_locked.as_mut().unwrap().begin_update();
-        self.route_table.build_from_synced_info(
-            self.my_peer_id,
-            &self.synced_route_info,
-            NextHopPolicy::LeastHop,
-            calc_locked.as_mut().unwrap(),
-        );
+        self.route_table
+            .build_from_synced_info(
+                self.my_peer_id,
+                &self.synced_route_info,
+                NextHopPolicy::LeastHop,
+                calc_locked.as_mut().unwrap(),
+            )
+            .await;
 
-        self.route_table_with_cost.build_from_synced_info(
-            self.my_peer_id,
-            &self.synced_route_info,
-            NextHopPolicy::LeastCost,
-            calc_locked.as_mut().unwrap(),
-        );
+        self.route_table_with_cost
+            .build_from_synced_info(
+                self.my_peer_id,
+                &self.synced_route_info,
+                NextHopPolicy::LeastCost,
+                calc_locked.as_mut().unwrap(),
+            )
+            .await;
         calc_locked.as_mut().unwrap().end_update();
     }
 
@@ -1281,20 +1289,20 @@ impl PeerRouteServiceImpl {
         }
     }
 
-    fn cost_calculator_need_update(&self) -> bool {
+    async fn cost_calculator_need_update(&self) -> bool {
         self.cost_calculator
             .lock()
-            .unwrap()
+            .await
             .as_ref()
             .map(|x| x.need_update())
             .unwrap_or(false)
     }
 
-    fn update_route_table_and_cached_local_conn_bitmap(&self) {
+    async fn update_route_table_and_cached_local_conn_bitmap(&self) {
         self.update_peer_info_last_update();
 
         // update route table first because we want to filter out unreachable peers.
-        self.update_route_table();
+        self.update_route_table().await;
 
         // the conn_bitmap should contain complete list of directly connected peers.
         // use union of dst peers can preserve this property.
@@ -1409,7 +1417,7 @@ impl PeerRouteServiceImpl {
     }
 
     async fn update_my_infos(&self) -> bool {
-        let my_peer_info_updated = self.update_my_peer_info();
+        let my_peer_info_updated = self.update_my_peer_info().await;
         let my_conn_info_updated = self.update_my_conn_info().await;
         let my_foreign_network_updated = self.update_my_foreign_network().await;
         if my_conn_info_updated || my_peer_info_updated {
@@ -1978,7 +1986,9 @@ impl RouteSessionManager {
         }
 
         if need_update_route_table {
-            service_impl.update_route_table_and_cached_local_conn_bitmap();
+            service_impl
+                .update_route_table_and_cached_local_conn_bitmap()
+                .await;
         }
 
         if let Some(foreign_network) = &foreign_network {
@@ -2082,9 +2092,9 @@ impl PeerRoute {
                 session_mgr.sync_now("update_my_infos");
             }
 
-            if service_impl.cost_calculator_need_update() {
+            if service_impl.cost_calculator_need_update().await {
                 tracing::debug!("cost_calculator_need_update");
-                service_impl.update_route_table();
+                service_impl.update_route_table().await;
             }
 
             select! {
@@ -2228,8 +2238,8 @@ impl Route for PeerRoute {
     }
 
     async fn set_route_cost_fn(&self, _cost_fn: RouteCostCalculator) {
-        *self.service_impl.cost_calculator.lock().unwrap() = Some(_cost_fn);
-        self.service_impl.update_route_table();
+        *self.service_impl.cost_calculator.lock().await = Some(_cost_fn);
+        self.service_impl.update_route_table().await;
     }
 
     async fn dump(&self) -> String {
@@ -2618,9 +2628,7 @@ mod tests {
 
         check_rpc_counter(&r_a, p_b.my_peer_id(), 2, 2);
 
-        p_a.get_peer_map()
-            .close_peer(p_b.my_peer_id())
-            .unwrap();
+        p_a.get_peer_map().close_peer(p_b.my_peer_id()).unwrap();
         wait_for_condition(
             || async { r_a.list_routes().await.len() == 0 },
             Duration::from_secs(5),
