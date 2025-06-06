@@ -565,7 +565,7 @@ impl ForeignNetworkManager {
                     }
                     GlobalCtxEvent::PeerConnRemoved(..) => {
                         tracing::info!(?e, "clear no conn peer from foreign network manager");
-                        data.clear_no_conn_peer(&network_name);
+                        data.clear_no_conn_peer(&network_name).await;
                     }
                     GlobalCtxEvent::PeerAdded(_) => {
                         tracing::info!(?e, "add peer to foreign network manager");
