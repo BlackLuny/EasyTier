@@ -1845,13 +1845,15 @@ impl RouteSessionManager {
                 _ = tokio::time::sleep(Duration::from_millis(next_sleep_ms)) => {}
                 _ = recv.recv() => {}
             }
-
+            // 当前所有有连接的peers，包括外部网络和本地网络
             let mut peers = service_impl.list_peers_from_interface::<Vec<_>>().await;
             peers.sort();
 
+            // 当前有session的peers
             let session_peers = self.list_session_peers();
             for peer_id in session_peers.iter() {
                 if !peers.contains(peer_id) {
+                    // 如果是当前的cur_dst_peer_id_to_initiate挂掉了，则重新选择
                     if Some(*peer_id) == cur_dst_peer_id_to_initiate {
                         cur_dst_peer_id_to_initiate = None;
                     }
@@ -1859,7 +1861,7 @@ impl RouteSessionManager {
                 }
             }
 
-            // find peer_ids that are not initiators.
+            // find peer_ids that are not initiators. 找到所有我们主动发起的session或者还没有session的peers
             let initiator_candidates = peers
                 .iter()
                 .filter(|x| {
@@ -1875,7 +1877,7 @@ impl RouteSessionManager {
                 next_sleep_ms = 1000;
                 continue;
             }
-
+            // 找到符合要求的 new_initiator_dst
             let mut new_initiator_dst = None;
             // if any peer has NoPAT or OpenInternet stun type, we should use it.
             for peer_id in initiator_candidates.iter() {
@@ -1890,7 +1892,7 @@ impl RouteSessionManager {
             if new_initiator_dst.is_none() {
                 new_initiator_dst = Some(*initiator_candidates.first().unwrap());
             }
-
+            // 判断是否需要更新initiator
             if new_initiator_dst != cur_dst_peer_id_to_initiate {
                 tracing::warn!(
                     "new_initiator: {:?}, prev: {:?}, my_id: {:?}",
