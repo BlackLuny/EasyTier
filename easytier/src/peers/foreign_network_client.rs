@@ -99,7 +99,7 @@ impl ForeignNetworkClient {
                     let Some(peer_map) = peer_map.upgrade() else {
                         break;
                     };
-                    peer_map.clean_peer_without_conn();
+                    peer_map.clean_peer_without_conn().await;
                 }
             })
             .into(),

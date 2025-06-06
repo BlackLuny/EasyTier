@@ -22,7 +22,7 @@ impl PeerManagerRpcService {
         PeerManagerRpcService { peer_manager }
     }
 
-    pub fn list_peers(&self) -> Vec<PeerInfo> {
+    pub async fn list_peers(&self) -> Vec<PeerInfo> {
         let mut peers = self.peer_manager.get_peer_map().list_peers();
         peers.extend(
             self.peer_manager
@@ -44,13 +44,14 @@ impl PeerManagerRpcService {
                 .map(Into::into)
                 .collect();
 
-            if let Some(conns) = peer_map.list_peer_conns(peer) {
+            if let Some(conns) = peer_map.list_peer_conns(peer).await {
                 peer_info.conns = conns;
             } else if let Some(conns) = self
                 .peer_manager
                 .get_foreign_network_client()
                 .get_peer_map()
                 .list_peer_conns(peer)
+                .await
             {
                 peer_info.conns = conns;
             }
@@ -72,7 +73,7 @@ impl PeerManageRpc for PeerManagerRpcService {
     ) -> Result<ListPeerResponse, rpc_types::error::Error> {
         let mut reply = ListPeerResponse::default();
 
-        let peers = self.list_peers();
+        let peers = self.list_peers().await;
         for peer in peers {
             reply.peer_infos.push(peer);
         }
@@ -108,7 +109,8 @@ impl PeerManageRpc for PeerManagerRpcService {
         let reply = self
             .peer_manager
             .get_foreign_network_manager()
-            .list_foreign_networks();
+            .list_foreign_networks()
+            .await;
         Ok(reply)
     }
 

@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeSet,
     fmt::Debug,
-    hash::RandomState,
     net::Ipv4Addr,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -13,9 +12,10 @@ use std::{
 use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
 use petgraph::{
-    algo::{all_simple_paths, dijkstra, spfa},
-    graph::NodeIndex,
-    Directed, Graph,
+    algo::dijkstra,
+    graph::{Graph, NodeIndex},
+    visit::{EdgeRef, IntoNodeReferences},
+    Directed,
 };
 use prost::Message;
 use prost_reflect::{DynamicMessage, ReflectMessage};
@@ -49,6 +49,7 @@ use crate::{
 };
 
 use super::{
+    graph_algo::dijkstra_with_first_hop,
     peer_rpc::PeerRpcManager,
     route_trait::{
         DefaultRouteCostCalculator, ForeignNetworkRouteInfoMap, NextHopPolicy, RouteCostCalculator,
@@ -60,7 +61,8 @@ use super::{
 static SERVICE_ID: u32 = 7;
 static UPDATE_PEER_INFO_PERIOD: Duration = Duration::from_secs(3600);
 static REMOVE_DEAD_PEER_INFO_AFTER: Duration = Duration::from_secs(3660);
-static AVOID_RELAY_COST: i32 = i32::MAX / 512;
+// the cost (latency between two peers) is i32, i32::MAX is large enough.
+static AVOID_RELAY_COST: usize = i32::MAX as usize;
 
 type Version = u32;
 
@@ -80,14 +82,13 @@ impl AtomicVersion {
         self.0.store(version, Ordering::Relaxed);
     }
 
-    fn inc(&self) {
-        self.0.fetch_add(1, Ordering::Relaxed);
+    fn inc(&self) -> Version {
+        self.0.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn set_if_larger(&self, version: Version) {
-        if self.get() < version {
-            self.set(version);
-        }
+    fn set_if_larger(&self, version: Version) -> bool {
+        // return true if the version is set.
+        self.0.fetch_max(version, Ordering::Relaxed) < version
     }
 }
 
@@ -283,13 +284,25 @@ impl RouteConnBitmap {
 type Error = SyncRouteInfoError;
 
 // constructed with all infos synced from all peers.
-#[derive(Debug)]
 struct SyncedRouteInfo {
     peer_infos: DashMap<PeerId, RoutePeerInfo>,
     // prost doesn't support unknown fields, so we use DynamicMessage to store raw infos and progate them to other peers.
     raw_peer_infos: DashMap<PeerId, DynamicMessage>,
     conn_map: DashMap<PeerId, (BTreeSet<PeerId>, AtomicVersion)>,
     foreign_network: DashMap<ForeignNetworkRouteInfoKey, ForeignNetworkRouteInfoEntry>,
+
+    version: AtomicVersion,
+}
+
+impl Debug for SyncedRouteInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncedRouteInfo")
+            .field("peer_infos", &self.peer_infos)
+            .field("conn_map", &self.conn_map)
+            .field("foreign_network", &self.foreign_network)
+            .field("version", &self.version.get())
+            .finish()
+    }
 }
 
 impl SyncedRouteInfo {
@@ -305,17 +318,24 @@ impl SyncedRouteInfo {
         self.raw_peer_infos.remove(&peer_id);
         self.conn_map.remove(&peer_id);
         self.foreign_network.retain(|k, _| k.peer_id != peer_id);
+        self.version.inc();
     }
 
     fn fill_empty_peer_info(&self, peer_ids: &BTreeSet<PeerId>) {
+        let mut need_inc_version = false;
         for peer_id in peer_ids {
-            self.peer_infos
-                .entry(*peer_id)
-                .or_insert_with(|| RoutePeerInfo::new());
+            self.peer_infos.entry(*peer_id).or_insert_with(|| {
+                need_inc_version = true;
+                RoutePeerInfo::new()
+            });
 
-            self.conn_map
-                .entry(*peer_id)
-                .or_insert_with(|| (BTreeSet::new(), AtomicVersion::new()));
+            self.conn_map.entry(*peer_id).or_insert_with(|| {
+                need_inc_version = true;
+                (BTreeSet::new(), AtomicVersion::new())
+            });
+        }
+        if need_inc_version {
+            self.version.inc();
         }
     }
 
@@ -377,6 +397,7 @@ impl SyncedRouteInfo {
         peer_infos: &Vec<RoutePeerInfo>,
         raw_peer_infos: &Vec<DynamicMessage>,
     ) -> Result<(), Error> {
+        let mut need_inc_version = false;
         for (idx, route_info) in peer_infos.iter().enumerate() {
             let mut route_info = route_info.clone();
             let raw_route_info = &raw_peer_infos[idx];
@@ -410,13 +431,18 @@ impl SyncedRouteInfo {
                         self.raw_peer_infos
                             .insert(route_info.peer_id, raw_route_info.clone());
                         *old_entry = route_info.clone();
+                        need_inc_version = true;
                     }
                 })
                 .or_insert_with(|| {
+                    need_inc_version = true;
                     self.raw_peer_infos
                         .insert(route_info.peer_id, raw_route_info.clone());
                     route_info.clone()
                 });
+        }
+        if need_inc_version {
+            self.version.inc();
         }
         Ok(())
     }
@@ -424,8 +450,9 @@ impl SyncedRouteInfo {
     fn update_conn_map(&self, conn_bitmap: &RouteConnBitmap) {
         self.fill_empty_peer_info(&conn_bitmap.peer_ids.iter().map(|x| x.0).collect());
 
+        let mut need_inc_version = false;
+
         for (peer_idx, (peer_id, version)) in conn_bitmap.peer_ids.iter().enumerate() {
-            assert!(self.peer_infos.contains_key(peer_id));
             let connceted_peers = conn_bitmap.get_connected_peers(peer_idx);
             self.fill_empty_peer_info(&connceted_peers);
 
@@ -433,16 +460,18 @@ impl SyncedRouteInfo {
                 .entry(*peer_id)
                 .and_modify(|(old_conn_bitmap, old_version)| {
                     if *version > old_version.get() {
-                        *old_conn_bitmap = conn_bitmap.get_connected_peers(peer_idx);
+                        *old_conn_bitmap = connceted_peers.clone();
+                        need_inc_version = true;
                         old_version.set(*version);
                     }
                 })
                 .or_insert_with(|| {
-                    (
-                        conn_bitmap.get_connected_peers(peer_idx),
-                        version.clone().into(),
-                    )
+                    need_inc_version = true;
+                    (connceted_peers, version.clone().into())
                 });
+        }
+        if need_inc_version {
+            self.version.inc();
         }
     }
 
@@ -483,7 +512,12 @@ impl SyncedRouteInfo {
         let old_version = old.version;
         *old = new;
 
-        new_version != old_version
+        if new_version != old_version {
+            self.version.inc();
+            true
+        } else {
+            false
+        }
     }
 
     fn update_my_conn_info(&self, my_peer_id: PeerId, connected_peers: BTreeSet<PeerId>) -> bool {
@@ -499,6 +533,7 @@ impl SyncedRouteInfo {
         } else {
             let _ = std::mem::replace(&mut my_conn_info.value_mut().0, connected_peers);
             my_conn_info.value().1.inc();
+            self.version.inc();
             true
         }
     }
@@ -557,6 +592,10 @@ impl SyncedRouteInfo {
             updated = true;
         }
 
+        if updated {
+            self.version.inc();
+        }
+
         updated
     }
 
@@ -573,13 +612,14 @@ impl SyncedRouteInfo {
     }
 }
 
-type PeerGraph = Graph<PeerId, i32, Directed>;
+type PeerGraph = Graph<PeerId, usize, Directed>;
 type PeerIdToNodexIdxMap = DashMap<PeerId, NodeIndex>;
 #[derive(Debug, Clone, Copy)]
 struct NextHopInfo {
     next_hop_peer_id: PeerId,
     path_latency: i32,
     path_len: usize, // path includes src and dst.
+    version: Version,
 }
 // dst_peer_id -> (next_hop_peer_id, cost, path_len)
 type NextHopMap = DashMap<PeerId, NextHopInfo>;
@@ -591,6 +631,7 @@ struct RouteTable {
     next_hop_map: NextHopMap,
     ipv4_peer_id_map: DashMap<Ipv4Addr, PeerId>,
     cidr_peer_id_map: DashMap<cidr::IpCidr, PeerId>,
+    next_hop_map_version: AtomicVersion,
 }
 
 impl RouteTable {
@@ -600,15 +641,23 @@ impl RouteTable {
             next_hop_map: DashMap::new(),
             ipv4_peer_id_map: DashMap::new(),
             cidr_peer_id_map: DashMap::new(),
+            next_hop_map_version: AtomicVersion::new(),
         }
     }
 
     fn get_next_hop(&self, dst_peer_id: PeerId) -> Option<NextHopInfo> {
-        self.next_hop_map.get(&dst_peer_id).map(|x| *x)
+        let cur_version = self.next_hop_map_version.get();
+        self.next_hop_map.get(&dst_peer_id).and_then(|x| {
+            if x.version >= cur_version {
+                Some(*x)
+            } else {
+                None
+            }
+        })
     }
 
     fn peer_reachable(&self, peer_id: PeerId) -> bool {
-        self.next_hop_map.contains_key(&peer_id)
+        self.get_next_hop(peer_id).is_some()
     }
 
     fn get_nat_type(&self, peer_id: PeerId) -> Option<NatType> {
@@ -617,186 +666,16 @@ impl RouteTable {
             .map(|x| NatType::try_from(x.udp_stun_info as i32).unwrap_or_default())
     }
 
-    fn get_update_time(&self, peer_id: PeerId) -> Option<SystemTime> {
-        self.peer_infos
-            .get(&peer_id)
-            .map(|x| x.last_update.map(|y| SystemTime::try_from(y).ok()))
-            .flatten()
-            .flatten()
-    }
-
+    // return graph and start node index (node of my peer id).
     fn build_peer_graph_from_synced_info<T: RouteCostCalculatorInterface>(
-        peers: Vec<PeerId>,
-        synced_info: &SyncedRouteInfo,
-        cost_calc: &mut T,
-    ) -> (PeerGraph, PeerIdToNodexIdxMap) {
-        let mut graph: PeerGraph = Graph::new();
-        let peer_id_to_node_index = PeerIdToNodexIdxMap::new();
-        for peer_id in peers.iter() {
-            peer_id_to_node_index.insert(*peer_id, graph.add_node(*peer_id));
-        }
-
-        for peer_id in peers.iter() {
-            let connected_peers = synced_info
-                .get_connected_peers(*peer_id)
-                .unwrap_or(BTreeSet::new());
-
-            // if avoid relay, just set all outgoing edges to a large value: AVOID_RELAY_COST.
-            let peer_avoid_relay_data = synced_info.get_avoid_relay_data(*peer_id);
-
-            for dst_peer_id in connected_peers.iter() {
-                let Some(dst_idx) = peer_id_to_node_index.get(dst_peer_id) else {
-                    continue;
-                };
-
-                graph.add_edge(
-                    *peer_id_to_node_index.get(&peer_id).unwrap(),
-                    *dst_idx,
-                    if peer_avoid_relay_data {
-                        AVOID_RELAY_COST
-                    } else {
-                        cost_calc.calculate_cost(*peer_id, *dst_peer_id)
-                    },
-                );
-            }
-        }
-
-        (graph, peer_id_to_node_index)
-    }
-
-    fn gen_next_hop_map_with_least_hop<T: RouteCostCalculatorInterface>(
-        my_peer_id: PeerId,
-        graph: &PeerGraph,
-        idx_map: &PeerIdToNodexIdxMap,
-        cost_calc: &mut T,
-    ) -> NextHopMap {
-        let res = dijkstra(&graph, *idx_map.get(&my_peer_id).unwrap(), None, |_| 1);
-        let next_hop_map = NextHopMap::new();
-        for (node_idx, cost) in res.iter() {
-            if *cost == 0 {
-                continue;
-            }
-            let mut all_paths = all_simple_paths::<Vec<_>, _, RandomState>(
-                graph,
-                *idx_map.get(&my_peer_id).unwrap(),
-                *node_idx,
-                *cost - 1,
-                Some(*cost + 1), // considering having avoid relay, the max cost could be a bit larger.
-            )
-            .collect::<Vec<_>>();
-
-            assert!(!all_paths.is_empty());
-            all_paths.sort_by(|a, b| a.len().cmp(&b.len()));
-
-            // find a path with least cost.
-            let mut min_cost = i32::MAX;
-            let mut min_path_len = usize::MAX;
-            let mut min_path = Vec::new();
-            for path in all_paths.iter() {
-                if min_path_len < path.len() && min_cost < AVOID_RELAY_COST {
-                    // the min path does not contain avoid relay node.
-                    break;
-                }
-
-                let mut cost = 0;
-                for i in 0..path.len() - 1 {
-                    let src_peer_id = *graph.node_weight(path[i]).unwrap();
-                    let dst_peer_id = *graph.node_weight(path[i + 1]).unwrap();
-                    let edge_weight = *graph
-                        .edge_weight(graph.find_edge(path[i], path[i + 1]).unwrap())
-                        .unwrap();
-                    if edge_weight != 1 {
-                        // means avoid relay.
-                        cost += edge_weight;
-                    } else {
-                        cost += cost_calc.calculate_cost(src_peer_id, dst_peer_id);
-                    }
-                }
-
-                if cost <= min_cost {
-                    min_cost = cost;
-                    min_path = path.clone();
-                    min_path_len = path.len();
-                }
-            }
-            next_hop_map.insert(
-                *graph.node_weight(*node_idx).unwrap(),
-                NextHopInfo {
-                    next_hop_peer_id: *graph.node_weight(min_path[1]).unwrap(),
-                    path_latency: min_cost,
-                    path_len: min_path_len,
-                },
-            );
-        }
-
-        next_hop_map
-    }
-
-    fn gen_next_hop_map_with_least_cost(
-        my_peer_id: PeerId,
-        graph: &PeerGraph,
-        idx_map: &PeerIdToNodexIdxMap,
-    ) -> NextHopMap {
-        let next_hop_map = NextHopMap::new();
-        let my_node_idx = *idx_map.get(&my_peer_id).unwrap();
-
-        let Ok(spfa_path) = spfa(graph, my_node_idx, |e| *e.weight()) else {
-            return next_hop_map;
-        };
-
-        let get_next_node_to = |node_idx: NodeIndex| -> Option<(i32, NodeIndex, usize)> {
-            let mut cur_node_idx = node_idx;
-            let mut path_len = 1;
-            let Some(dist) = spfa_path.distances.get(node_idx.index()) else {
-                return None;
-            };
-            loop {
-                let Some(Some(prev)) = spfa_path.predecessors.get(cur_node_idx.index()) else {
-                    break;
-                };
-                if *prev == my_node_idx {
-                    break;
-                }
-                cur_node_idx = *prev;
-                path_len += 1;
-            }
-
-            return Some((*dist, cur_node_idx, path_len));
-        };
-
-        for item in idx_map.iter() {
-            if *item.key() == my_peer_id {
-                continue;
-            }
-
-            let dst_peer_node_idx = *item.value();
-
-            let Some((cost, next_node_idx, path_len)) = get_next_node_to(dst_peer_node_idx) else {
-                continue;
-            };
-
-            next_hop_map.insert(
-                *item.key(),
-                NextHopInfo {
-                    next_hop_peer_id: *graph.node_weight(next_node_idx).unwrap(),
-                    path_latency: cost,
-                    path_len,
-                },
-            );
-        }
-
-        next_hop_map
-    }
-
-    async fn build_from_synced_info<T: RouteCostCalculatorInterface>(
-        &self,
         my_peer_id: PeerId,
         synced_info: &SyncedRouteInfo,
-        policy: NextHopPolicy,
-        mut cost_calc: T,
-    ) {
-        // build  peer_infos
-        self.peer_infos.clear();
+        cost_calc: &T,
+    ) -> (PeerGraph, NodeIndex) {
+        let mut graph: PeerGraph = PeerGraph::new();
+
+        let mut start_node_idx = None;
+        let peer_id_to_node_index: PeerIdToNodexIdxMap = DashMap::new();
         for item in synced_info.peer_infos.iter() {
             let peer_id = item.key();
             let info = item.value();
@@ -805,114 +684,183 @@ impl RouteTable {
                 continue;
             }
 
-            self.peer_infos.insert(*peer_id, info.clone());
+            let node_idx = graph.add_node(*peer_id);
+
+            peer_id_to_node_index.insert(*peer_id, node_idx);
+            if *peer_id == my_peer_id {
+                start_node_idx = Some(node_idx);
+            }
         }
 
-        if self.peer_infos.is_empty() {
+        if start_node_idx.is_none() {
+            return (graph, NodeIndex::end());
+        }
+
+        for item in peer_id_to_node_index.iter() {
+            let src_peer_id = item.key();
+            let src_node_idx = item.value();
+            let connected_peers = synced_info
+                .get_connected_peers(*src_peer_id)
+                .unwrap_or(BTreeSet::new());
+
+            // if avoid relay, just set all outgoing edges to a large value: AVOID_RELAY_COST.
+            let peer_avoid_relay_data = synced_info.get_avoid_relay_data(*src_peer_id);
+
+            for dst_peer_id in connected_peers.iter() {
+                let Some(dst_node_idx) = peer_id_to_node_index.get(dst_peer_id) else {
+                    continue;
+                };
+
+                let mut cost = cost_calc.calculate_cost(*src_peer_id, *dst_peer_id) as usize;
+                if peer_avoid_relay_data {
+                    cost += AVOID_RELAY_COST;
+                }
+
+                graph.add_edge(*src_node_idx, *dst_node_idx, cost);
+            }
+        }
+
+        (graph, start_node_idx.unwrap())
+    }
+
+    fn clean_expired_route_info(&self) {
+        let cur_version = self.next_hop_map_version.get();
+        self.next_hop_map.retain(|_, v| {
+            // remove next hop map for peers we cannot reach.
+            v.version >= cur_version
+        });
+        self.peer_infos.retain(|k, _| {
+            // remove peer info for peers we cannot reach.
+            self.next_hop_map.contains_key(k)
+        });
+        self.ipv4_peer_id_map.retain(|_, v| {
+            // remove ipv4 map for peers we cannot reach.
+            self.next_hop_map.contains_key(v)
+        });
+        self.cidr_peer_id_map.retain(|_, v| {
+            // remove cidr map for peers we cannot reach.
+            self.next_hop_map.contains_key(v)
+        });
+    }
+
+    fn gen_next_hop_map_with_least_hop(
+        &self,
+        graph: &PeerGraph,
+        start_node: &NodeIndex,
+        version: Version,
+    ) {
+        let normalize_edge_cost = |e: petgraph::graph::EdgeReference<usize>| {
+            if *e.weight() >= AVOID_RELAY_COST {
+                AVOID_RELAY_COST + 1
+            } else {
+                1
+            }
+        };
+        // Step 1: 第一次 Dijkstra - 计算最短跳数
+        let path_len_map = dijkstra(&graph, *start_node, None, normalize_edge_cost);
+
+        // Step 2: 构建最短跳数子图（只保留属于最短路径和 AVOID RELAY 的边）
+        let mut subgraph: PeerGraph = PeerGraph::new();
+        let mut start_node_idx = None;
+        for (node_idx, peer_id) in graph.node_references() {
+            let new_node_idx = subgraph.add_node(*peer_id);
+            if node_idx == *start_node {
+                start_node_idx = Some(new_node_idx);
+            }
+        }
+
+        for edge in graph.edge_references() {
+            let (src, tgt) = graph.edge_endpoints(edge.id()).unwrap();
+            let Some(src_path_len) = path_len_map.get(&src) else {
+                continue;
+            };
+            let Some(tgt_path_len) = path_len_map.get(&tgt) else {
+                continue;
+            };
+            if *src_path_len + normalize_edge_cost(edge) == *tgt_path_len {
+                subgraph.add_edge(src, tgt, *edge.weight());
+            }
+        }
+
+        // Step 3: 第二次 Dijkstra - 在子图上找代价最小的路径
+        self.gen_next_hop_map_with_least_cost(&subgraph, &start_node_idx.clone().unwrap(), version);
+    }
+
+    fn gen_next_hop_map_with_least_cost(
+        &self,
+        graph: &PeerGraph,
+        start_node: &NodeIndex,
+        version: Version,
+    ) {
+        let (costs, next_hops) = dijkstra_with_first_hop(&graph, *start_node, |e| *e.weight());
+
+        for (dst, (next_hop, path_len)) in next_hops.iter() {
+            let info = NextHopInfo {
+                next_hop_peer_id: *graph.node_weight(*next_hop).unwrap(),
+                path_latency: (*costs.get(dst).unwrap() % AVOID_RELAY_COST) as i32,
+                path_len: *path_len as usize,
+                version,
+            };
+            let dst_peer_id = *graph.node_weight(*dst).unwrap();
+            self.next_hop_map
+                .entry(dst_peer_id)
+                .and_modify(|x| {
+                    if x.version < version {
+                        *x = info;
+                    }
+                })
+                .or_insert(info);
+        }
+
+        self.next_hop_map_version.set_if_larger(version);
+    }
+
+    fn build_from_synced_info<T: RouteCostCalculatorInterface>(
+        &self,
+        my_peer_id: PeerId,
+        synced_info: &SyncedRouteInfo,
+        policy: NextHopPolicy,
+        cost_calc: &T,
+    ) {
+        let version = synced_info.version.get();
+
+        // build next hop map
+        let (graph, start_node) =
+            Self::build_peer_graph_from_synced_info(my_peer_id, &synced_info, cost_calc);
+
+        if graph.node_count() == 0 {
+            tracing::warn!("no peer in graph, cannot build next hop map");
             return;
         }
 
-        // build next hop map
-        self.next_hop_map.clear();
-        self.next_hop_map.insert(
-            my_peer_id,
-            NextHopInfo {
-                next_hop_peer_id: my_peer_id,
-                path_latency: 0,
-                path_len: 1,
-            },
-        );
-        let (graph, idx_map) = Self::build_peer_graph_from_synced_info(
-            self.peer_infos.iter().map(|x| *x.key()).collect(),
-            &synced_info,
-            &mut cost_calc,
-        );
-        let next_hop_map = if matches!(policy, NextHopPolicy::LeastHop) {
-            Self::gen_next_hop_map_with_least_hop(my_peer_id, &graph, &idx_map, &mut cost_calc)
+        if matches!(policy, NextHopPolicy::LeastHop) {
+            self.gen_next_hop_map_with_least_hop(&graph, &start_node, version);
         } else {
-            tokio::task::spawn_blocking(move || {
-                Self::gen_next_hop_map_with_least_cost(my_peer_id, &graph, &idx_map)
-            })
-            .await
-            .unwrap()
+            self.gen_next_hop_map_with_least_cost(&graph, &start_node, version);
         };
-        for item in next_hop_map.iter() {
-            self.next_hop_map.insert(*item.key(), *item.value());
-        }
-        // build graph
 
-        // build ipv4_peer_id_map, cidr_peer_id_map
-        self.ipv4_peer_id_map.clear();
-        self.cidr_peer_id_map.clear();
-
-        let mut to_remove = Vec::new();
-        for item in self.peer_infos.iter() {
-            // only set ipv4 map for peers we can reach.
-            if !self.next_hop_map.contains_key(item.key()) {
+        // build peer_infos, ipv4_peer_id_map, cidr_peer_id_map
+        // only set map for peers we can reach.
+        for item in self.next_hop_map.iter() {
+            if item.version < version {
+                // skip if the next hop entry is outdated. (peer is unreachable)
                 continue;
             }
 
             let peer_id = item.key();
-            let info = item.value();
+            let Some(info) = synced_info.peer_infos.get(peer_id) else {
+                continue;
+            };
+
+            self.peer_infos.insert(*peer_id, info.clone());
 
             if let Some(ipv4_addr) = info.ipv4_addr {
-                if let Some(prev_peer_id) = self.ipv4_peer_id_map.insert(ipv4_addr.into(), *peer_id)
-                {
-                    tracing::warn!(
-                        ?ipv4_addr,
-                        ?prev_peer_id,
-                        ?peer_id,
-                        "ipv4_peer_id_map collision"
-                    );
-                    if let Some(prev_update_time) = self.get_update_time(prev_peer_id) {
-                        if let Some(cur_update_time) = item
-                            .last_update
-                            .map(|y| SystemTime::try_from(y).ok())
-                            .flatten()
-                        {
-                            if prev_update_time > cur_update_time
-                                && self.next_hop_map.contains_key(&prev_peer_id)
-                            {
-                                // if prev_peer_id is newer, we should keep it.
-                                self.ipv4_peer_id_map.insert(ipv4_addr.into(), prev_peer_id);
-                                to_remove.push(*peer_id);
-                            } else {
-                                to_remove.push(prev_peer_id);
-                            }
-                        }
-                    }
-                }
+                self.ipv4_peer_id_map.insert(ipv4_addr.into(), *peer_id);
             }
 
             for cidr in info.proxy_cidrs.iter() {
-                if let Some(prev_peer_id) = self
-                    .cidr_peer_id_map
-                    .insert(cidr.parse().unwrap(), *peer_id)
-                {
-                    tracing::warn!(?cidr, ?prev_peer_id, ?peer_id, "cidr_peer_id_map collision");
-                    if let Some(prev_update_time) = self.get_update_time(prev_peer_id) {
-                        if let Some(cur_update_time) = item
-                            .last_update
-                            .map(|y| SystemTime::try_from(y).ok())
-                            .flatten()
-                        {
-                            if prev_update_time > cur_update_time
-                                && self.next_hop_map.contains_key(&prev_peer_id)
-                            {
-                                self.cidr_peer_id_map
-                                    .insert(cidr.parse().unwrap(), prev_peer_id);
-                                to_remove.push(*peer_id);
-                            } else {
-                                to_remove.push(prev_peer_id);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for peer_id in to_remove.iter() {
-            if *peer_id != my_peer_id {
-                synced_info.remove_peer(*peer_id);
+                self.cidr_peer_id_map
+                    .insert(cidr.parse().unwrap(), *peer_id);
             }
         }
     }
@@ -1107,12 +1055,13 @@ struct PeerRouteServiceImpl {
 
     interface: Mutex<Option<RouteInterfaceBox>>,
 
-    cost_calculator: tokio::sync::Mutex<Option<RouteCostCalculator>>,
+    cost_calculator: std::sync::RwLock<Option<RouteCostCalculator>>,
     route_table: RouteTable,
     route_table_with_cost: RouteTable,
     foreign_network_owner_map: DashMap<NetworkIdentity, Vec<PeerId>>,
     synced_route_info: SyncedRouteInfo,
     cached_local_conn_map: std::sync::Mutex<RouteConnBitmap>,
+    cached_local_conn_map_version: AtomicVersion,
 
     last_update_my_foreign_network: AtomicCell<Option<std::time::Instant>>,
 
@@ -1148,7 +1097,7 @@ impl PeerRouteServiceImpl {
 
             interface: Mutex::new(None),
 
-            cost_calculator: tokio::sync::Mutex::new(Some(Box::new(DefaultRouteCostCalculator))),
+            cost_calculator: std::sync::RwLock::new(Some(Box::new(DefaultRouteCostCalculator))),
 
             route_table: RouteTable::new(),
             route_table_with_cost: RouteTable::new(),
@@ -1159,8 +1108,10 @@ impl PeerRouteServiceImpl {
                 raw_peer_infos: DashMap::new(),
                 conn_map: DashMap::new(),
                 foreign_network: DashMap::new(),
+                version: AtomicVersion::new(),
             },
             cached_local_conn_map: std::sync::Mutex::new(RouteConnBitmap::new()),
+            cached_local_conn_map_version: AtomicVersion::new(),
 
             last_update_my_foreign_network: AtomicCell::new(None),
 
@@ -1200,13 +1151,13 @@ impl PeerRouteServiceImpl {
             .collect()
     }
 
-    async fn update_my_peer_info(&self) -> bool {
+    fn update_my_peer_info(&self) -> bool {
         if self.synced_route_info.update_my_peer_info(
             self.my_peer_id,
             self.my_peer_route_id,
             &self.global_ctx,
         ) {
-            self.update_route_table_and_cached_local_conn_bitmap().await;
+            self.update_route_table_and_cached_local_conn_bitmap();
             return true;
         }
         false
@@ -1219,7 +1170,7 @@ impl PeerRouteServiceImpl {
             .update_my_conn_info(self.my_peer_id, connected_peers);
 
         if updated {
-            self.update_route_table_and_cached_local_conn_bitmap().await;
+            self.update_route_table_and_cached_local_conn_bitmap();
         }
 
         updated
@@ -1255,28 +1206,38 @@ impl PeerRouteServiceImpl {
         updated
     }
 
-    async fn update_route_table(&self) {
-        let mut calc_locked = self.cost_calculator.lock().await;
+    fn update_route_table(&self) {
+        self.cost_calculator
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .begin_update();
 
-        calc_locked.as_mut().unwrap().begin_update();
-        self.route_table
-            .build_from_synced_info(
-                self.my_peer_id,
-                &self.synced_route_info,
-                NextHopPolicy::LeastHop,
-                calc_locked.as_mut().unwrap(),
-            )
-            .await;
+        let calc_locked = self.cost_calculator.read().unwrap();
 
-        self.route_table_with_cost
-            .build_from_synced_info(
-                self.my_peer_id,
-                &self.synced_route_info,
-                NextHopPolicy::LeastCost,
-                calc_locked.as_mut().unwrap(),
-            )
-            .await;
-        calc_locked.as_mut().unwrap().end_update();
+        self.route_table.build_from_synced_info(
+            self.my_peer_id,
+            &self.synced_route_info,
+            NextHopPolicy::LeastHop,
+            calc_locked.as_ref().unwrap(),
+        );
+
+        self.route_table_with_cost.build_from_synced_info(
+            self.my_peer_id,
+            &self.synced_route_info,
+            NextHopPolicy::LeastCost,
+            calc_locked.as_ref().unwrap(),
+        );
+
+        drop(calc_locked);
+
+        self.cost_calculator
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .end_update();
     }
 
     fn update_foreign_network_owner_map(&self) {
@@ -1308,20 +1269,22 @@ impl PeerRouteServiceImpl {
         }
     }
 
-    async fn cost_calculator_need_update(&self) -> bool {
+    fn cost_calculator_need_update(&self) -> bool {
         self.cost_calculator
-            .lock()
-            .await
+            .read()
+            .unwrap()
             .as_ref()
             .map(|x| x.need_update())
             .unwrap_or(false)
     }
 
-    async fn update_route_table_and_cached_local_conn_bitmap(&self) {
+    fn update_route_table_and_cached_local_conn_bitmap(&self) {
         self.update_peer_info_last_update();
 
         // update route table first because we want to filter out unreachable peers.
-        self.update_route_table().await;
+        self.update_route_table();
+
+        let synced_version = self.synced_route_info.version.get();
 
         // the conn_bitmap should contain complete list of directly connected peers.
         // use union of dst peers can preserve this property.
@@ -1348,7 +1311,9 @@ impl PeerRouteServiceImpl {
 
         let all_peer_ids = &conn_bitmap.peer_ids;
         for (peer_idx, (peer_id, _)) in all_peer_ids.iter().enumerate() {
-            let connected = self.synced_route_info.conn_map.get(peer_id).unwrap();
+            let Some(connected) = self.synced_route_info.conn_map.get(peer_id) else {
+                continue;
+            };
 
             for (idx, (other_peer_id, _)) in all_peer_ids.iter().enumerate() {
                 if connected.0.contains(other_peer_id) {
@@ -1358,7 +1323,13 @@ impl PeerRouteServiceImpl {
             }
         }
 
-        *self.cached_local_conn_map.lock().unwrap() = conn_bitmap;
+        let mut locked = self.cached_local_conn_map.lock().unwrap();
+        if self
+            .cached_local_conn_map_version
+            .set_if_larger(synced_version)
+        {
+            *locked = conn_bitmap;
+        }
     }
 
     fn build_route_info(&self, session: &SyncRouteSession) -> Option<Vec<RoutePeerInfo>> {
@@ -1436,7 +1407,7 @@ impl PeerRouteServiceImpl {
     }
 
     async fn update_my_infos(&self) -> bool {
-        let my_peer_info_updated = self.update_my_peer_info().await;
+        let my_peer_info_updated = self.update_my_peer_info();
         let my_conn_info_updated = self.update_my_conn_info().await;
         let my_foreign_network_updated = self.update_my_foreign_network().await;
         if my_conn_info_updated || my_peer_info_updated {
@@ -1500,6 +1471,9 @@ impl PeerRouteServiceImpl {
         for p in to_remove.iter() {
             self.synced_route_info.foreign_network.remove(p);
         }
+
+        self.route_table.clean_expired_route_info();
+        self.route_table_with_cost.clean_expired_route_info();
     }
 
     fn build_sync_route_raw_req(
@@ -1845,15 +1819,13 @@ impl RouteSessionManager {
                 _ = tokio::time::sleep(Duration::from_millis(next_sleep_ms)) => {}
                 _ = recv.recv() => {}
             }
-            // 当前所有有连接的peers，包括外部网络和本地网络
+
             let mut peers = service_impl.list_peers_from_interface::<Vec<_>>().await;
             peers.sort();
 
-            // 当前有session的peers
             let session_peers = self.list_session_peers();
             for peer_id in session_peers.iter() {
                 if !peers.contains(peer_id) {
-                    // 如果是当前的cur_dst_peer_id_to_initiate挂掉了，则重新选择
                     if Some(*peer_id) == cur_dst_peer_id_to_initiate {
                         cur_dst_peer_id_to_initiate = None;
                     }
@@ -1861,7 +1833,7 @@ impl RouteSessionManager {
                 }
             }
 
-            // find peer_ids that are not initiators. 找到所有我们主动发起的session或者还没有session的peers
+            // find peer_ids that are not initiators.
             let initiator_candidates = peers
                 .iter()
                 .filter(|x| {
@@ -1877,7 +1849,7 @@ impl RouteSessionManager {
                 next_sleep_ms = 1000;
                 continue;
             }
-            // 找到符合要求的 new_initiator_dst
+
             let mut new_initiator_dst = None;
             // if any peer has NoPAT or OpenInternet stun type, we should use it.
             for peer_id in initiator_candidates.iter() {
@@ -1892,7 +1864,7 @@ impl RouteSessionManager {
             if new_initiator_dst.is_none() {
                 new_initiator_dst = Some(*initiator_candidates.first().unwrap());
             }
-            // 判断是否需要更新initiator
+
             if new_initiator_dst != cur_dst_peer_id_to_initiate {
                 tracing::warn!(
                     "new_initiator: {:?}, prev: {:?}, my_id: {:?}",
@@ -2007,9 +1979,7 @@ impl RouteSessionManager {
         }
 
         if need_update_route_table {
-            service_impl
-                .update_route_table_and_cached_local_conn_bitmap()
-                .await;
+            service_impl.update_route_table_and_cached_local_conn_bitmap();
         }
 
         if let Some(foreign_network) = &foreign_network {
@@ -2023,7 +1993,7 @@ impl RouteSessionManager {
             service_impl.update_foreign_network_owner_map();
         }
 
-        tracing::debug!(
+        tracing::info!(
             "handling sync_route_info rpc: from_peer_id: {:?}, is_initiator: {:?}, peer_infos: {:?}, conn_bitmap: {:?}, synced_route_info: {:?} session: {:?}, new_route_table: {:?}",
             from_peer_id, is_initiator, peer_infos, conn_bitmap, service_impl.synced_route_info, session, service_impl.route_table);
 
@@ -2113,9 +2083,10 @@ impl PeerRoute {
                 session_mgr.sync_now("update_my_infos");
             }
 
-            if service_impl.cost_calculator_need_update().await {
+            if service_impl.cost_calculator_need_update() {
                 tracing::debug!("cost_calculator_need_update");
-                service_impl.update_route_table().await;
+                service_impl.synced_route_info.version.inc();
+                service_impl.update_route_table();
             }
 
             select! {
@@ -2229,7 +2200,7 @@ impl Route for PeerRoute {
             let next_hop_peer_latency_first = route_table_with_cost.get_next_hop(*item.key());
             let mut route: crate::proto::cli::Route = item.value().clone().into();
             route.next_hop_peer_id = next_hop_peer.next_hop_peer_id;
-            route.cost = (next_hop_peer.path_len - 1) as i32;
+            route.cost = next_hop_peer.path_len as i32;
             route.path_latency = next_hop_peer.path_latency;
 
             route.next_hop_peer_id_latency_first =
@@ -2259,8 +2230,9 @@ impl Route for PeerRoute {
     }
 
     async fn set_route_cost_fn(&self, _cost_fn: RouteCostCalculator) {
-        *self.service_impl.cost_calculator.lock().await = Some(_cost_fn);
-        self.service_impl.update_route_table().await;
+        *self.service_impl.cost_calculator.write().unwrap() = Some(_cost_fn);
+        self.service_impl.synced_route_info.version.inc();
+        self.service_impl.update_route_table();
     }
 
     async fn dump(&self) -> String {
@@ -2400,7 +2372,10 @@ mod tests {
 
         for r in vec![r_a.clone(), r_b.clone()].iter() {
             wait_for_condition(
-                || async { r.list_routes().await.len() == 1 },
+                || async {
+                    println!("route: {:?}", r.list_routes().await);
+                    r.list_routes().await.len() == 1
+                },
                 Duration::from_secs(5),
             )
             .await;
@@ -2440,6 +2415,8 @@ mod tests {
         let i_b = get_is_initiator(&r_b, p_a.my_peer_id());
         assert_eq!(i_a.0, i_b.1);
         assert_eq!(i_b.0, i_a.1);
+
+        println!("after drop p_b, r_b");
 
         drop(r_b);
         drop(p_b);
@@ -2649,7 +2626,9 @@ mod tests {
 
         check_rpc_counter(&r_a, p_b.my_peer_id(), 2, 2);
 
-        p_a.get_peer_map().close_peer(p_b.my_peer_id()).unwrap();
+        p_a.get_peer_map()
+            .close_peer(p_b.my_peer_id())
+            .unwrap();
         wait_for_condition(
             || async { r_a.list_routes().await.len() == 0 },
             Duration::from_secs(5),
@@ -2783,105 +2762,5 @@ mod tests {
         let req2 = SyncRouteInfoRequest::decode(out_bytes.as_slice()).unwrap();
 
         assert_eq!(req, req2);
-    }
-
-    #[tokio::test]
-    async fn test_spfa_backtrack_algorithm() {
-        use petgraph::algo::spfa;
-        use petgraph::{graph::NodeIndex, Graph};
-
-        // 创建与 petgraph 文档示例相同的图
-        // Graph represented with the weight of each edge.
-        //
-        //     3       1
-        // a ----- b ----- c
-        // | 2     | 7     |
-        // d       f       | -4
-        // | -1    | 1     |
-        // \------ e ------/
-
-        let mut graph: Graph<u32, i32, petgraph::Directed> = Graph::new();
-        let a = graph.add_node(0); // node a, peer_id = 0
-        let b = graph.add_node(1); // node b, peer_id = 1
-        let c = graph.add_node(2); // node c, peer_id = 2
-        let d = graph.add_node(3); // node d, peer_id = 3
-        let e = graph.add_node(4); // node e, peer_id = 4
-        let f = graph.add_node(5); // node f, peer_id = 5
-
-        graph.extend_with_edges(&[
-            (a, b, 3),  // a -> b, cost = 3
-            (a, d, 2),  // a -> d, cost = 2
-            (b, c, 1),  // b -> c, cost = 1
-            (b, f, 7),  // b -> f, cost = 7
-            (c, e, -4), // c -> e, cost = -4
-            (d, e, -1), // d -> e, cost = -1
-            (e, f, 1),  // e -> f, cost = 1
-        ]);
-
-        // 运行 SPFA 算法，从节点 a 开始
-        let spfa_result = spfa(&graph, a, |edge| *edge.weight());
-        assert!(spfa_result.is_ok());
-        let spfa_path = spfa_result.unwrap();
-
-        // 先打印实际的 SPFA 结果以了解算法输出
-        println!("SPFA 距离结果: {:?}", spfa_path.distances);
-        println!("SPFA 前驱结果: {:?}", spfa_path.predecessors);
-
-        // 验证距离结果（实际运行得到的结果）
-        assert_eq!(spfa_path.distances, vec![0, 3, 4, 2, 0, 1]);
-
-        // 测试我们的回溯算法
-        let my_node_idx = a;
-
-        let get_next_node_to = |node_idx: NodeIndex| -> Option<(i32, NodeIndex, usize)> {
-            let mut cur_node_idx = node_idx;
-            let mut path_len = 1;
-            let Some(dist) = spfa_path.distances.get(node_idx.index()) else {
-                return None;
-            };
-            loop {
-                let Some(Some(prev)) = spfa_path.predecessors.get(cur_node_idx.index()) else {
-                    break;
-                };
-                if *prev == my_node_idx {
-                    break;
-                }
-                cur_node_idx = *prev;
-                path_len += 1;
-            }
-            return Some((*dist, cur_node_idx, path_len));
-        };
-
-        // 测试所有节点并打印结果
-        for (name, node_idx) in [("b", b), ("c", c), ("d", d), ("e", e), ("f", f)] {
-            if let Some((total_cost, next_node, path_len)) = get_next_node_to(node_idx) {
-                println!(
-                    "到节点 {}: 总距离={}, 下一跳={:?}, 路径长度={}",
-                    name, total_cost, next_node, path_len
-                );
-            }
-        }
-
-        // 基本验证：回溯算法应该正确返回距离
-        let result_b = get_next_node_to(b).unwrap();
-        assert_eq!(result_b.0, 3); // 到 b 的距离应该是 3
-        assert_eq!(result_b.1, b); // 下一个节点应该是 b 本身（直连）
-        assert_eq!(result_b.2, 1); // 路径长度为 1（直连）
-
-        let result_c = get_next_node_to(c).unwrap();
-        assert_eq!(result_c.0, 4); // 到 c 的距离应该是 4
-
-        let result_d = get_next_node_to(d).unwrap();
-        assert_eq!(result_d.0, 2); // 到 d 的距离应该是 2
-        assert_eq!(result_d.1, d); // 下一个节点应该是 d 本身（直连）
-        assert_eq!(result_d.2, 1); // 路径长度为 1（直连）
-
-        let result_e = get_next_node_to(e).unwrap();
-        assert_eq!(result_e.0, 0); // 到 e 的距离应该是 0 (注意这里可能有负权环)
-
-        let result_f = get_next_node_to(f).unwrap();
-        assert_eq!(result_f.0, 1); // 到 f 的距离应该是 1
-
-        println!("✅ 基本回溯算法测试通过!");
     }
 }

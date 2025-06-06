@@ -301,23 +301,23 @@ impl PeerMap {
         ret
     }
 
-    pub fn list_peers_with_conn(&self) -> Vec<PeerId> {
+    pub async fn list_peers_with_conn(&self) -> Vec<PeerId> {
         let mut ret = Vec::new();
         let peers = self.list_peers();
         for peer_id in peers.iter() {
             let Some(peer) = self.get_peer_by_id(*peer_id) else {
                 continue;
             };
-            if peer.list_peer_conns().len() > 0 {
+            if peer.list_peer_conns().await.len() > 0 {
                 ret.push(*peer_id);
             }
         }
         ret
     }
 
-    pub fn list_peer_conns(&self, peer_id: PeerId) -> Option<Vec<PeerConnInfo>> {
+    pub async fn list_peer_conns(&self, peer_id: PeerId) -> Option<Vec<PeerConnInfo>> {
         if let Some(p) = self.get_peer_by_id(peer_id) {
-            Some(p.list_peer_conns())
+            Some(p.list_peer_conns().await)
         } else {
             return None;
         }
@@ -358,11 +358,11 @@ impl PeerMap {
         routes.insert(0, route);
     }
 
-    pub fn clean_peer_without_conn(&self) {
+    pub async fn clean_peer_without_conn(&self) {
         let mut to_remove = vec![];
 
         for peer_id in self.list_peers() {
-            let conns = self.list_peer_conns(peer_id);
+            let conns = self.list_peer_conns(peer_id).await;
             if conns.is_none() || conns.as_ref().unwrap().is_empty() {
                 to_remove.push(peer_id);
             }
@@ -403,11 +403,15 @@ impl PeerMap {
             .collect()
     }
 
-    pub fn has_directly_connected_conn_as(&self, peer_id: PeerId, as_client: bool) -> Option<bool> {
+    pub async fn has_directly_connected_conn_as(
+        &self,
+        peer_id: PeerId,
+        as_client: bool,
+    ) -> Option<bool> {
         let Some(peer) = self.get_peer_by_id(peer_id) else {
             return None;
         };
-        for conn in peer.list_peer_conns() {
+        for conn in peer.list_peer_conns().await {
             if conn.is_client == as_client {
                 return Some(true);
             }

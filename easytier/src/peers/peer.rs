@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
 
-use tokio::{select, sync::mpsc, task::JoinHandle};
+use tokio::{select, sync::mpsc};
 
 use tracing::Instrument;
 
@@ -30,7 +30,7 @@ pub struct Peer {
     packet_recv_chain_pair: PacketRecvChainPair,
 
     close_event_sender: mpsc::Sender<PeerConnId>,
-    close_event_listener: JoinHandle<()>,
+    close_event_listener: ScopedTask<()>,
 
     shutdown_notifier: Arc<tokio::sync::Notify>,
 
@@ -85,7 +85,8 @@ impl Peer {
                 "peer_close_event_listener",
                 ?peer_node_id,
             )),
-        );
+        )
+        .into();
 
         let default_conn_id = Arc::new(AtomicCell::new(PeerConnId::default()));
 
@@ -119,7 +120,8 @@ impl Peer {
         let close_notifier = conn.get_close_notifier();
         let conn_info = conn.get_conn_info();
 
-        conn.start_recv_loop(self.packet_recv_chain_pair.clone()).await;
+        conn.start_recv_loop(self.packet_recv_chain_pair.clone())
+            .await;
         conn.start_pingpong();
         self.conns.insert(conn.get_conn_id(), Arc::new(conn));
 
@@ -177,11 +179,17 @@ impl Peer {
         Ok(())
     }
 
-    pub fn list_peer_conns(&self) -> Vec<PeerConnInfo> {
+    pub async fn list_peer_conns(&self) -> Vec<PeerConnInfo> {
         let mut ret = vec![];
         for conn in self.conns.iter() {
             // do not lock here, otherwise it will cause dashmap deadlock
-            ret.push(conn.get_conn_info());
+            let info = conn.get_conn_info();
+            if !info.is_closed {
+                ret.push(info);
+            } else {
+                let conn_id = info.conn_id.parse().unwrap();
+                let _ = self.close_peer_conn(&conn_id).await;
+            }
         }
         ret
     }
@@ -253,15 +261,15 @@ mod tests {
         local_peer.add_peer_conn(local_peer_conn).await;
         remote_peer.add_peer_conn(remote_peer_conn).await;
 
-        assert_eq!(local_peer.list_peer_conns().len(), 1);
-        assert_eq!(remote_peer.list_peer_conns().len(), 1);
+        assert_eq!(local_peer.list_peer_conns().await.len(), 1);
+        assert_eq!(remote_peer.list_peer_conns().await.len(), 1);
 
         let close_handler =
             tokio::spawn(async move { local_peer.close_peer_conn(&local_conn_id).await });
 
         // wait for remote peer conn close
         timeout(std::time::Duration::from_secs(5), async {
-            while (&remote_peer).list_peer_conns().len() != 0 {
+            while (&remote_peer).list_peer_conns().await.len() != 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         })

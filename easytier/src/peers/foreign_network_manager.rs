@@ -232,7 +232,7 @@ impl ForeignNetworkEntry {
                     .accessor
                     .list_global_foreign_peer(&self.network_identity)
                     .await;
-                let local = peer_map.list_peers_with_conn();
+                let local = peer_map.list_peers_with_conn().await;
                 global.extend(local.iter().cloned());
                 global
                     .into_iter()
@@ -264,7 +264,13 @@ impl ForeignNetworkEntry {
         let rpc_sender = self.rpc_sender.clone();
         let peer_map = self.peer_map.clone();
         let relay_data = self.relay_data;
-        let pm_sender = self.pm_packet_sender.lock().await.as_ref().map(|v| v.clone()).unwrap();
+        let pm_sender = self
+            .pm_packet_sender
+            .lock()
+            .await
+            .as_ref()
+            .map(|v| v.clone())
+            .unwrap();
         let network_name = self.network.network_name.clone();
 
         self.tasks
@@ -396,7 +402,7 @@ impl ForeignNetworkManagerData {
         }
     }
 
-    fn clear_no_conn_peer(&self, network_name: &String) {
+    async fn clear_no_conn_peer(&self, network_name: &String) {
         let Some(peer_map) = self
             .network_peer_maps
             .get(network_name)
@@ -404,7 +410,7 @@ impl ForeignNetworkManagerData {
         else {
             return;
         };
-        peer_map.clean_peer_without_conn();
+        peer_map.clean_peer_without_conn().await;
     }
 
     fn remove_network(&self, network_name: &String) {
@@ -575,7 +581,7 @@ impl ForeignNetworkManager {
         });
     }
 
-    pub fn list_foreign_networks(&self) -> ListForeignNetworkResponse {
+    pub async fn list_foreign_networks(&self) -> ListForeignNetworkResponse {
         let mut ret = ListForeignNetworkResponse::default();
         let networks = self
             .data
@@ -605,7 +611,7 @@ impl ForeignNetworkManager {
             for peer in item.peer_map.list_peers() {
                 let mut peer_info = PeerInfo::default();
                 peer_info.peer_id = peer;
-                peer_info.conns = item.peer_map.list_peer_conns(peer).unwrap_or(vec![]);
+                peer_info.conns = item.peer_map.list_peer_conns(peer).await.unwrap_or(vec![]);
                 entry.peers.push(peer_info);
             }
 
@@ -712,7 +718,8 @@ mod tests {
 
         let rpc_resp = pm_center
             .get_foreign_network_manager()
-            .list_foreign_networks();
+            .list_foreign_networks()
+            .await;
         assert_eq!(1, rpc_resp.foreign_networks.len());
         assert_eq!(2, rpc_resp.foreign_networks["net1"].peers.len());
     }
@@ -866,7 +873,8 @@ mod tests {
 
         let rpc_resp = pm_center
             .get_foreign_network_manager()
-            .list_foreign_networks();
+            .list_foreign_networks()
+            .await;
         assert_eq!(2, rpc_resp.foreign_networks.len());
         assert_eq!(3, rpc_resp.foreign_networks["net1"].peers.len());
         assert_eq!(2, rpc_resp.foreign_networks["net2"].peers.len());

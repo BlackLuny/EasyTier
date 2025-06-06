@@ -290,7 +290,7 @@ impl PeerCenterInstance {
         self.client
             .init_periodic_job(ctx, |client, ctx| async move {
                 let my_node_id = ctx.peer_mgr.my_peer_id();
-                let peers: PeerInfoForGlobalMap = ctx.job_ctx.service.list_peers().into();
+                let peers: PeerInfoForGlobalMap = ctx.job_ctx.service.list_peers().await.into();
                 let peer_list = peers.direct_peers.keys().map(|k| *k).collect();
                 let job_ctx = &ctx.job_ctx;
 
