@@ -1760,13 +1760,13 @@ impl RouteSessionManager {
                 drop(service_impl);
                 drop(peer_rpc);
 
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
 
             sync_now = sync_now.resubscribe();
 
             select! {
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                _ = tokio::time::sleep(Duration::from_secs(3)) => {}
                 ret = sync_now.recv() => match ret {
                     Err(e) => {
                         tracing::debug!(?e, "session_task sync_now recv failed, ospf route may exit");
@@ -1846,7 +1846,7 @@ impl RouteSessionManager {
                 .collect::<Vec<_>>();
 
             if initiator_candidates.is_empty() {
-                next_sleep_ms = 1000;
+                next_sleep_ms = 3000;
                 continue;
             }
 
@@ -1902,7 +1902,7 @@ impl RouteSessionManager {
                 }
             }
 
-            next_sleep_ms = 1000;
+            next_sleep_ms = 3000;
         }
     }
 
@@ -2626,9 +2626,7 @@ mod tests {
 
         check_rpc_counter(&r_a, p_b.my_peer_id(), 2, 2);
 
-        p_a.get_peer_map()
-            .close_peer(p_b.my_peer_id())
-            .unwrap();
+        p_a.get_peer_map().close_peer(p_b.my_peer_id()).unwrap();
         wait_for_condition(
             || async { r_a.list_routes().await.len() == 0 },
             Duration::from_secs(5),
