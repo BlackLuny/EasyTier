@@ -67,6 +67,7 @@ message NetworkConfig {
     optional bool enable_magic_dns = 42;
     optional bool enable_private_mode = 43;
     optional bool try_connect_as_client = 44;
+    repeated string rpc_portal_whitelists = 45;
 }
 
 message MyNodeInfo {

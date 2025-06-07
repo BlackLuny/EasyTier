@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
+use cidr::IpCidr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -87,6 +88,9 @@ pub trait ConfigLoader: Send + Sync {
 
     fn get_rpc_portal(&self) -> Option<SocketAddr>;
     fn set_rpc_portal(&self, addr: SocketAddr);
+
+    fn get_rpc_portal_whitelist(&self) -> Option<Vec<IpCidr>>;
+    fn set_rpc_portal_whitelist(&self, whitelist: Option<Vec<IpCidr>>);
 
     fn get_vpn_portal_config(&self) -> Option<VpnPortalConfig>;
     fn set_vpn_portal_config(&self, config: VpnPortalConfig);
@@ -244,6 +248,7 @@ struct Config {
     console_logger: Option<ConsoleLoggerConfig>,
 
     rpc_portal: Option<SocketAddr>,
+    rpc_portal_whitelist: Option<Vec<IpCidr>>,
 
     vpn_portal_config: Option<VpnPortalConfig>,
 
@@ -543,6 +548,14 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn set_rpc_portal(&self, addr: SocketAddr) {
         self.config.lock().unwrap().rpc_portal = Some(addr);
+    }
+
+    fn get_rpc_portal_whitelist(&self) -> Option<Vec<IpCidr>> {
+        self.config.lock().unwrap().rpc_portal_whitelist.clone()
+    }
+
+    fn set_rpc_portal_whitelist(&self, whitelist: Option<Vec<IpCidr>>) {
+        self.config.lock().unwrap().rpc_portal_whitelist = whitelist;
     }
 
     fn get_vpn_portal_config(&self) -> Option<VpnPortalConfig> {

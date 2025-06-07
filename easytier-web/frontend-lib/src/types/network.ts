@@ -65,6 +65,9 @@ export interface NetworkConfig {
 
   enable_magic_dns?: boolean
   enable_private_mode?: boolean
+
+  rpc_portal_whitelists: string[]
+
   try_connect_as_client?: boolean
 }
 
@@ -124,6 +127,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     mapped_listeners: [],
     enable_magic_dns: false,
     enable_private_mode: false,
+    rpc_portal_whitelists: [],
     try_connect_as_client: false
   }
 }
