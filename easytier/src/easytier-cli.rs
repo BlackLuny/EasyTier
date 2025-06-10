@@ -737,6 +737,7 @@ impl Service {
             username: None,
             working_directory: Some(options.work_directory.clone()),
             environment: None,
+            disable_restart_on_failure: false,
         };
         if self.status()? != ServiceStatus::NotInstalled {
             return Err(anyhow::anyhow!(
@@ -1083,7 +1084,8 @@ async fn main() -> Result<(), Error> {
                     .iter()
                     .map(|(k, v)| format!("{}: {:?}ms", k, v.latency_ms,))
                     .collect::<Vec<_>>();
-                let direct_peers: Vec<_> = v.direct_peers
+                let direct_peers: Vec<_> = v
+                    .direct_peers
                     .iter()
                     .map(|(k, v)| DirectPeerItem {
                         node_id: k.to_string(),
